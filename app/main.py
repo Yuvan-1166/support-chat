@@ -1,0 +1,77 @@
+"""FastAPI application entry-point."""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app.api import chat, sessions
+from app.core.config import get_settings
+from app.core.logging import setup_logging
+from app.core.rate_limiter import RateLimitMiddleware
+
+
+# ── Lifecycle ────────────────────────────────────────────────────────────
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup / shutdown hooks."""
+    setup_logging()
+    yield
+    # Cleanup resources on shutdown (future: close DB pools, Redis, etc.)
+
+
+# ── App instance ─────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title="Support Chat API",
+    description=(
+        "Natural-language → data-query translation service with "
+        "session management, optional query execution, and insight generation."
+    ),
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+# ── Middleware ───────────────────────────────────────────────────────────
+
+# Rate limiting (in-memory, fixed-window, 60 req/min per IP)
+app.add_middleware(RateLimitMiddleware, max_requests=60, window_seconds=60)
+
+# CORS — allow all origins in development; tighten in production
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Routers ──────────────────────────────────────────────────────────────
+
+app.include_router(sessions.router)
+app.include_router(chat.router)
+
+
+# ── Health check ─────────────────────────────────────────────────────────
+
+
+@app.get("/health", tags=["System"])
+def health_check():
+    """Simple health-check endpoint."""
+    return {"status": "healthy", "version": app.version}
+
+
+# ── Global error handler ────────────────────────────────────────────────
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch unhandled exceptions and return a clean 500."""
+    settings = get_settings()
+    detail = str(exc) if settings.is_development else "Internal server error"
+    return JSONResponse(status_code=500, content={"detail": detail})
