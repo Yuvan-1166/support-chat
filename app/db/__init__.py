@@ -101,7 +101,7 @@ def _create_engine_from_settings() -> Engine:
         pool_recycle=1800,     # Recycle before MySQL's wait_timeout kicks in
         pool_size=5,           # Maintained warm connections per worker
         max_overflow=10,       # Extra connections allowed under burst load
-        echo=settings.is_development,  # Log SQL statements only in dev
+        echo=False,            # SQL logging controlled via LOG_LEVEL=DEBUG in .env
     )
 
 

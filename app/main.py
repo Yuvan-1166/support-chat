@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api import chat, sessions
+from app.core.access_log import AccessLogMiddleware
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.core.rate_limiter import RateLimitMiddleware
@@ -83,6 +84,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Access logging — outermost so it captures every request including
+# rate-limited (429) and CORS-rejected ones.
+app.add_middleware(AccessLogMiddleware, coloured=get_settings().is_development)
 
 # ── Routers ──────────────────────────────────────────────────────────────
 
