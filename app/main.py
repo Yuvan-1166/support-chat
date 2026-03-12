@@ -53,7 +53,9 @@ async def lifespan(app: FastAPI):
     try:
         await asyncio.to_thread(_warm_db)
     except Exception as exc:
-        logger.warning("DB warm-up failed (will retry on first request): %s", exc)
+        logger.error(
+            "DB warm-up failed — check DATABASE_URL / SSL cert config: %s", exc
+        )
 
     yield
     # Cleanup resources on shutdown (future: close DB pools, Redis, etc.)

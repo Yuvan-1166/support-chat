@@ -27,8 +27,11 @@ This prevents import-time crashes when ``DATABASE_URL`` is not yet set
 
 from __future__ import annotations
 
+import base64
 import logging
+import os
 import ssl
+import tempfile
 import threading
 from typing import Generator
 
@@ -48,32 +51,67 @@ _lock = threading.Lock()
 
 # ── SSL / connect-args helper ─────────────────────────────────────────────
 
-def _build_connect_args(db_url: str, ssl_ca: str) -> dict:
+# Holds the path to a tempfile written from DB_SSL_CA_B64 so it persists
+# for the lifetime of the process without being re-created on every call.
+_ssl_ca_tempfile: tempfile.NamedTemporaryFile | None = None
+
+
+def _resolve_ssl_ca(ssl_ca: str, ssl_ca_b64: str) -> str:
+    """Return a usable CA cert file path, or empty string if none configured.
+
+    Priority: DB_SSL_CA_B64 (base64 env var) > DB_SSL_CA (file path).
+    """
+    global _ssl_ca_tempfile
+
+    if ssl_ca_b64:
+        # Decode the base64 PEM and write to a persistent temp file.
+        if _ssl_ca_tempfile is None:
+            raw = base64.b64decode(ssl_ca_b64)
+            _ssl_ca_tempfile = tempfile.NamedTemporaryFile(
+                prefix="aiven_ca_", suffix=".pem", delete=False
+            )
+            _ssl_ca_tempfile.write(raw)
+            _ssl_ca_tempfile.flush()
+            logger.info("MySQL SSL: decoded DB_SSL_CA_B64 → %s", _ssl_ca_tempfile.name)
+        return _ssl_ca_tempfile.name
+
+    if ssl_ca:
+        if not os.path.isfile(ssl_ca):
+            raise FileNotFoundError(
+                f"DB_SSL_CA is set to '{ssl_ca}' but the file does not exist.\n"
+                "For containerised / cloud deployments use DB_SSL_CA_B64 instead:\n"
+                "  base64 -w0 ca.pem   # copy the output into the env var on Render"
+            )
+        return ssl_ca
+
+    return ""
+
+
+def _build_connect_args(db_url: str, ssl_ca: str, ssl_ca_b64: str = "") -> dict:
     """Return driver-level ``connect_args`` appropriate for the database dialect.
 
     Parameters
     ----------
-    db_url:
-        Full SQLAlchemy connection URL (used to detect the dialect).
-    ssl_ca:
-        Optional path to the Aiven CA certificate.  Empty string means
-        "use platform trust-store but still require TLS."
+    db_url:    Full SQLAlchemy connection URL (dialect detected from prefix).
+    ssl_ca:    Path to CA certificate file (local dev).
+    ssl_ca_b64: Base64-encoded CA certificate content (cloud/container).
     """
     dialect = db_url.split("://")[0].split("+")[0].lower()
 
     if dialect != "mysql":
         return {}
 
-    if ssl_ca:
-        # Full chain verification with CA cert.
-        ssl_ctx = ssl.create_default_context(cafile=ssl_ca)
+    ca_path = _resolve_ssl_ca(ssl_ca, ssl_ca_b64)
+
+    if ca_path:
+        ssl_ctx = ssl.create_default_context(cafile=ca_path)
         ssl_ctx.check_hostname = True
         ssl_ctx.verify_mode = ssl.CERT_REQUIRED
-        logger.info("MySQL SSL: using CA certificate at %s", ssl_ca)
+        logger.info("MySQL SSL: CA certificate loaded from %s", ca_path)
         return {"ssl": ssl_ctx}
 
-    # No explicit CA → PyMySQL TLS with platform trust-store.
-    logger.info("MySQL SSL: using platform trust-store (ssl_disabled=False)")
+    # No CA cert → rely on platform trust-store (connection still encrypted).
+    logger.info("MySQL SSL: using platform trust-store (no CA cert specified)")
     return {"ssl": {"ssl_disabled": False}}
 
 
@@ -91,7 +129,7 @@ def _create_engine_from_settings() -> Engine:
             "?ssl_disabled=False"
         )
 
-    connect_args = _build_connect_args(db_url, settings.DB_SSL_CA)
+    connect_args = _build_connect_args(db_url, settings.DB_SSL_CA, settings.DB_SSL_CA_B64)
     logger.info("Creating database engine for: %s", settings.db_url_safe)
 
     return create_engine(
