@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session as DBSession
 
 from app.core.security import require_api_key
+from app.db import get_db
 from app.schemas.chat import ChatMessageRequest, ChatMessageResponse
 from app.services.chat_service import get_chat_service
-from app.services.session_store import get_session_store
+from app.services.sql_session_store import get_session_store
 
 router = APIRouter(prefix="/sessions", tags=["Chat"])
 
@@ -21,6 +23,7 @@ def send_message(
     session_id: str,
     body: ChatMessageRequest,
     _api_key: str = Depends(require_api_key),
+    db: DBSession = Depends(get_db),
 ):
     """Submit a natural-language message and receive a generated query,
     optional execution results, and optional natural-language insight.
@@ -35,7 +38,7 @@ def send_message(
     4. If ``generate_insight`` is ``True`` and results exist, the LLM
        produces a plain-English summary.
     """
-    store = get_session_store()
+    store = get_session_store(db)
     session = store.get(session_id)
     if session is None:
         raise HTTPException(
@@ -44,5 +47,5 @@ def send_message(
         )
 
     chat_service = get_chat_service()
-    response = chat_service.handle_message(session, body)
+    response = chat_service.handle_message(store, session, body)
     return response

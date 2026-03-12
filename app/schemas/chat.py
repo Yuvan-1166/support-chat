@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -44,7 +44,7 @@ class ChatMessageResponse(BaseModel):
     query: Optional[str] = Field(None, description="Generated data query, if applicable")
     query_result: Optional[Any] = Field(None, description="Result of executing the query")
     insight: Optional[str] = Field(None, description="Natural-language insight from the results")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ChatHistoryResponse(BaseModel):

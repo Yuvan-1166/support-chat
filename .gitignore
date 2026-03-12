@@ -13,8 +13,16 @@ venv/
 .venv/
 env/
 
-# ── Environment ──
+# ── Environment / secrets ──
 .env
+*.pem
+*.key
+*.crt
+
+# ── Databases ──
+*.db
+*.sqlite
+*.sqlite3
 
 # ── IDE ──
 .vscode/
@@ -30,6 +38,10 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+*.log
 
 # ── Docker ──
-*.log
+docker-compose.override.yml
+
+# ── Pip parsing artifacts (e.g. accidental "uv pip install >=x.y") ──
+=*

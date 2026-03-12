@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-def _create_session(client, **overrides):
+def _create_session(test_client, **overrides):
     """Helper to create a session with default payload."""
     payload = {
         "query_type": "mysql",
@@ -19,16 +19,16 @@ def _create_session(client, **overrides):
         ],
     }
     payload.update(overrides)
-    resp = client.post("/sessions", json=payload)
+    resp = test_client.post("/sessions", json=payload)
     assert resp.status_code == 201
     return resp.json()["session_id"]
 
 
 class TestSendMessage:
-    def test_returns_generated_query(self, client):
-        session_id = _create_session(client)
+    def test_returns_generated_query(self, test_client):
+        session_id = _create_session(test_client)
 
-        resp = client.post(
+        resp = test_client.post(
             f"/sessions/{session_id}/chat",
             json={"message": "How many contacts have a score above 5?"},
         )
@@ -38,39 +38,39 @@ class TestSendMessage:
         assert data["query"] is not None
         assert "SELECT" in data["query"]
 
-    def test_returns_404_for_unknown_session(self, client):
-        resp = client.post(
+    def test_returns_404_for_unknown_session(self, test_client):
+        resp = test_client.post(
             "/sessions/nonexistent/chat",
             json={"message": "Hello"},
         )
         assert resp.status_code == 404
 
-    def test_conversation_history_grows(self, client):
-        session_id = _create_session(client)
+    def test_conversation_history_grows(self, test_client):
+        session_id = _create_session(test_client)
 
         # First message
-        client.post(
+        test_client.post(
             f"/sessions/{session_id}/chat",
             json={"message": "How many contacts?"},
         )
 
         # Second message
-        client.post(
+        test_client.post(
             f"/sessions/{session_id}/chat",
             json={"message": "What about score above 10?"},
         )
 
         # Check history
-        resp = client.get(f"/sessions/{session_id}/history")
+        resp = test_client.get(f"/sessions/{session_id}/history")
         assert resp.status_code == 200
         messages = resp.json()["messages"]
         # 2 user messages + 2 assistant replies = 4
         assert len(messages) == 4
 
-    def test_query_result_triggers_insight(self, client, mock_llm_client):
-        session_id = _create_session(client)
+    def test_query_result_triggers_insight(self, test_client, mock_llm_client):
+        session_id = _create_session(test_client)
 
-        resp = client.post(
+        resp = test_client.post(
             f"/sessions/{session_id}/chat",
             json={
                 "message": "Explain these results",
@@ -83,10 +83,10 @@ class TestSendMessage:
         # The mock returns a fixed insight string
         assert "42" in data["content"]
 
-    def test_no_execution_without_db_url(self, client):
-        session_id = _create_session(client)  # no db_url
+    def test_no_execution_without_db_url(self, test_client):
+        session_id = _create_session(test_client)  # no db_url
 
-        resp = client.post(
+        resp = test_client.post(
             f"/sessions/{session_id}/chat",
             json={
                 "message": "How many contacts have a score above 5?",

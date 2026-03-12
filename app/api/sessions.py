@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session as DBSession
 
 from app.core.security import require_api_key
+from app.db import get_db
 from app.schemas.chat import ChatHistoryResponse, ChatMessageResponse
 from app.schemas.session import (
     SessionCreateRequest,
     SessionCreateResponse,
     SessionInfoResponse,
 )
-from app.services.session_store import get_session_store
+from app.services.sql_session_store import get_session_store
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
@@ -25,9 +27,10 @@ router = APIRouter(prefix="/sessions", tags=["Sessions"])
 def create_session(
     body: SessionCreateRequest,
     _api_key: str = Depends(require_api_key),
+    db: DBSession = Depends(get_db),
 ):
     """Create a new session with schema context and optional DB connection."""
-    store = get_session_store()
+    store = get_session_store(db)
     session = store.create(
         query_type=body.query_type,
         schema_context=body.schema_context,
@@ -50,9 +53,10 @@ def create_session(
 def get_session(
     session_id: str,
     _api_key: str = Depends(require_api_key),
+    db: DBSession = Depends(get_db),
 ):
     """Retrieve session metadata and message count."""
-    store = get_session_store()
+    store = get_session_store(db)
     session = store.get(session_id)
     if session is None:
         raise HTTPException(
@@ -76,9 +80,10 @@ def get_session(
 def get_session_history(
     session_id: str,
     _api_key: str = Depends(require_api_key),
+    db: DBSession = Depends(get_db),
 ):
     """Return all messages in the session's conversation history."""
-    store = get_session_store()
+    store = get_session_store(db)
     session = store.get(session_id)
     if session is None:
         raise HTTPException(
@@ -108,9 +113,10 @@ def get_session_history(
 def delete_session(
     session_id: str,
     _api_key: str = Depends(require_api_key),
+    db: DBSession = Depends(get_db),
 ):
     """Terminate a session and remove its conversation history."""
-    store = get_session_store()
+    store = get_session_store(db)
     deleted = store.delete(session_id)
     if not deleted:
         raise HTTPException(

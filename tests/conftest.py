@@ -1,19 +1,24 @@
-"""Shared pytest fixtures."""
-
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
-
 import pytest
 from fastapi.testclient import TestClient
 
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.orm import sessionmaker
+
 from app.core.config import Settings
+from app.db import get_db
+from app.db.models import Base
+from app.core.llm import LLMClient
 
+# ── 1. Settings override ──────────────────────────────────────────────────
 
-@pytest.fixture(autouse=True)
-def _override_settings():
-    """Provide test-friendly settings for every test."""
-    test_settings = Settings(
+@pytest.fixture(scope="session")
+def test_settings():
+    """Provide test-friendly settings."""
+    return Settings(
         GROQ_API_KEY="test-key-not-real",
         GROQ_MODEL="test-model",
         APP_ENV="development",
@@ -21,49 +26,63 @@ def _override_settings():
         SESSION_TTL_SECONDS=300,
         API_KEYS="",  # empty = dev mode, no auth required
         RATE_LIMIT="1000/minute",
+        DATABASE_URL="sqlite:///:memory:"
     )
-    with patch("app.core.config.get_settings", return_value=test_settings):
-        yield test_settings
 
+# ── 2. Test Database Setup ────────────────────────────────────────────────
+
+@pytest.fixture(scope="function")
+def test_db_session():
+    """Create a fresh in-memory SQLite database for each test."""
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    
+    db = TestingSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+# ── 3. Mock LLM Client ────────────────────────────────────────────────────
 
 @pytest.fixture()
 def mock_llm_client():
-    """Return a mocked LLM client that returns predictable JSON."""
-    client = MagicMock()
+    client = MagicMock(spec=LLMClient)
+    client.chat_completion.return_value = '{"query": "SELECT * FROM test", "explanation": "test explanation"}'
     client.chat_completion_json.return_value = {
-        "query": "SELECT COUNT(*) FROM contacts WHERE score > 5",
-        "explanation": "Counts contacts with score above 5",
+        "query": "SELECT * FROM test",
+        "explanation": "test explanation",
         "confidence": 0.95,
     }
-    client.chat_completion.return_value = (
-        "There are 42 contacts with a score above 5."
-    )
     return client
 
 
-@pytest.fixture()
-def _patch_llm(mock_llm_client):
-    """Patch the global LLM client singleton."""
-    with patch("app.core.llm.get_llm_client", return_value=mock_llm_client):
-        # Also reset the chat service singleton so it picks up the mock
-        with patch("app.services.chat_service._chat_service", None):
-            yield mock_llm_client
-
+# ── 4. Test Client with Overrides ─────────────────────────────────────────
 
 @pytest.fixture()
-def fresh_session_store():
-    """Provide a fresh in-memory session store and patch the singleton."""
-    from app.services.session_store import InMemorySessionStore
-
-    store = InMemorySessionStore()
-    with patch("app.services.session_store.get_session_store", return_value=store):
-        yield store
-
-
-@pytest.fixture()
-def client(fresh_session_store, _patch_llm):
-    """FastAPI TestClient with mocked dependencies."""
+def test_client(test_db_session, mock_llm_client, test_settings):
     from app.main import app
+    from app.core.llm import get_llm_client
+    from app.core.config import get_settings
+    
+    def override_get_db():
+        try:
+            yield test_db_session
+        finally:
+            pass
 
-    with TestClient(app) as c:
-        yield c
+    app.dependency_overrides[get_settings] = lambda: test_settings
+    app.dependency_overrides[get_llm_client] = lambda: mock_llm_client
+    app.dependency_overrides[get_db] = override_get_db
+
+    client = TestClient(app)
+    yield client
+    
+    app.dependency_overrides.clear()

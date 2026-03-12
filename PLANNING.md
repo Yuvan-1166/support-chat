@@ -23,7 +23,7 @@ This document describes the technical stack, features, and architectural approac
    - Session expiration and cleanup (configurable TTL).
 
 2. **Query Translation**
-   - Use an LLM (preferably groq API) to convert natural-language prompts into data queries.
+   - Use an LLM to convert natural-language prompts into data queries.
    - Provide schema metadata (tables/fields, sample data) to inform the model.
    - Support multiple query dialects (SQL variants, MongoDB, Pandas, etc.).
    - Allow specification of target query type per session or per request.
@@ -117,5 +117,10 @@ support-chat/
 
 ---
 
-## Important Note:
-The application only be able to execute the queries if and only if the Database URL is given while creating the session, that is giving access to the chat bot to execute queries in the database, else it will only be giving the queries to the request, then they may give the result executed by themselves and give the output again to the chatbot to continue the chat if they need that. This will be a security feature that helps the users to protect thier data.
+## ✔️ Next Steps
+
+- Begin scaffolding the codebase (FastAPI project layout).
+- Create initial `POST /session` and `POST /session/{id}/message` routes with stub logic.
+- Develop prompt templates and test basic LLM translation.
+
+Let me know when you’re ready to start with the scaffold or if you want assistance generating the first files.

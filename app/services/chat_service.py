@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.core.llm import LLMClient, get_llm_client
 from app.schemas.chat import ChatMessageRequest, ChatMessageResponse
 from app.services.adapters import get_adapter
-from app.services.session_store import Session, get_session_store
+from app.services.session_store import Session, SessionStoreBase
 from app.services.translator import QueryTranslator
 
 logger = logging.getLogger(__name__)
@@ -32,13 +32,16 @@ class ChatService:
 
     def handle_message(
         self,
+        session_store: SessionStoreBase,
         session: Session,
         request: ChatMessageRequest,
     ) -> ChatMessageResponse:
         """Process a single user message within a session."""
 
         # ── 1. Record user message ───────────────────────────────────────
-        session.add_message("user", request.message)
+        session_store.add_message(session.session_id, "user", request.message)
+        # Update our in-memory domain session so the translator sees it
+        session.messages.append({"role": "user", "content": request.message})
 
         query: Optional[str] = None
         query_result: Optional[Any] = None
@@ -115,17 +118,19 @@ class ChatService:
             query=query,
             query_result=query_result,
             insight=insight,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
 
-        # Store the assistant message in session history
-        session.add_message(
-            "assistant",
-            content,
+        # Store the assistant message in session history via the DB-backed store
+        msg_dict = session_store.add_message(
+            session_id=session.session_id,
+            role="assistant",
+            content=content,
             query=query,
             query_result=query_result,
             insight=insight,
         )
+        session.messages.append(msg_dict)
 
         return response
 
