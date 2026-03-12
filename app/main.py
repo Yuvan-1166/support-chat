@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -13,14 +15,45 @@ from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.core.rate_limiter import RateLimitMiddleware
 
+# Apply logging config at import-time so it takes effect before uvicorn
+# installs its own handlers during startup.
+setup_logging()
+
+logger = logging.getLogger(__name__)
+
 
 # ── Lifecycle ────────────────────────────────────────────────────────────
+
+
+def _warm_db() -> None:
+    """Open one connection to verify DB reachability and pre-fill the pool.
+
+    Called in a thread-pool executor so the event loop is not blocked
+    during the SSL + TCP handshake to the remote database.
+    """
+    from sqlalchemy import text
+
+    from app.db import get_engine
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    logger.info("Database connection pool warmed up successfully.")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown hooks."""
+    # Re-apply after uvicorn may have overwritten the config during startup.
     setup_logging()
+
+    # Warm the DB pool in a background thread — avoids blocking the event
+    # loop during the SSL handshake to the remote Aiven MySQL host.
+    try:
+        await asyncio.to_thread(_warm_db)
+    except Exception as exc:
+        logger.warning("DB warm-up failed (will retry on first request): %s", exc)
+
     yield
     # Cleanup resources on shutdown (future: close DB pools, Redis, etc.)
 
