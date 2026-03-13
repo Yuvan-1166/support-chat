@@ -87,18 +87,26 @@ def _normalize_db_url(db_url: str) -> str:
     return parsed.render_as_string(hide_password=False)
 
 
-def _build_connect_args(db_url: str, ssl_ca_b64: str = "") -> dict:
+def _build_connect_args(db_url: str, ssl_ca_b64: str = "", ssl_verify: bool = True) -> dict:
     """Return driver-level ``connect_args`` appropriate for the database dialect.
 
     Parameters
     ----------
     db_url:    Full SQLAlchemy connection URL (dialect detected from prefix).
     ssl_ca_b64: Base64-encoded CA certificate content.
+    ssl_verify: Whether certificate verification is required.
     """
     dialect = db_url.split("://")[0].split("+")[0].lower()
 
     if dialect != "mysql":
         return {}
+
+    if not ssl_verify:
+        logger.warning("MySQL SSL: certificate verification disabled via ssl_verify=false")
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+        return {"ssl": ssl_ctx}
 
     ca_path = _resolve_ssl_ca(ssl_ca_b64)
 

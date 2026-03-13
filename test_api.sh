@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Configuration
-# API_URL="http://127.0.0.1:8000"
-API_URL="https://support-chat-nm8i.onrender.com"
+API_URL="http://127.0.0.1:8000"
+# API_URL="https://support-chat-nm8i.onrender.com"
 API_KEY="test-key"
 
 echo "================================================="

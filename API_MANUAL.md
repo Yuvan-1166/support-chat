@@ -174,6 +174,10 @@ Supported values:
 
 A list describing the tables, collections, or DataFrames the LLM should use.
 
+When `db_url` is provided for SQL-family query types (`sql`, `mysql`, `postgresql`, `sqlite`),
+the API auto-discovers schema (tables, columns, primary keys) from the target database.
+In that case, `schema_context` can be omitted or sent as an empty list.
+
 ### `db_url`
 
 Optional.

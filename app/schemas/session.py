@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── Enums ────────────────────────────────────────────────────────────────
@@ -54,8 +54,11 @@ class SessionCreateRequest(BaseModel):
         description="Target query language for this session",
     )
     schema_context: list[SchemaTable] = Field(
-        ...,
-        description="Tables / collections the LLM should know about",
+        default_factory=list,
+        description=(
+            "Optional when db_url is provided. If omitted and db_url is set, "
+            "the API auto-discovers schema from the target database."
+        ),
     )
     db_url: Optional[str] = Field(
         None,
@@ -68,6 +71,12 @@ class SessionCreateRequest(BaseModel):
         None,
         description="Extra instructions or business rules for the LLM",
     )
+
+    @model_validator(mode="after")
+    def validate_schema_source(self) -> "SessionCreateRequest":
+        if not self.schema_context and not self.db_url:
+            raise ValueError("Provide either schema_context or db_url.")
+        return self
 
 
 class SessionCreateResponse(BaseModel):

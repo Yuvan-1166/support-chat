@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session as DBSession
 
@@ -9,13 +11,23 @@ from app.core.security import require_api_key
 from app.db import get_db
 from app.schemas.chat import ChatHistoryResponse, ChatMessageResponse
 from app.schemas.session import (
+    QueryType,
     SessionCreateRequest,
     SessionCreateResponse,
     SessionInfoResponse,
 )
+from app.services.schema_introspector import introspect_schema
 from app.services.sql_session_store import get_session_store
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
+logger = logging.getLogger(__name__)
+
+_SQL_QUERY_TYPES = {
+    QueryType.SQL,
+    QueryType.MYSQL,
+    QueryType.POSTGRESQL,
+    QueryType.SQLITE,
+}
 
 
 @router.post(
@@ -30,10 +42,48 @@ def create_session(
     db: DBSession = Depends(get_db),
 ):
     """Create a new session with schema context and optional DB connection."""
+    schema_context = body.schema_context
+
+    if body.db_url and body.query_type in _SQL_QUERY_TYPES:
+        try:
+            discovered = introspect_schema(body.query_type, body.db_url)
+            if discovered:
+                schema_context = discovered
+                logger.info("Using auto-discovered schema for new session")
+            elif not schema_context:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "No tables discovered from the provided db_url. "
+                        "Provide schema_context manually or check DB permissions."
+                    ),
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if not schema_context:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Failed to auto-discover schema from db_url: {exc}. "
+                        "Provide schema_context manually or fix the DB URL/permissions."
+                    ),
+                )
+            logger.warning(
+                "Schema auto-discovery failed; using provided schema_context instead: %s",
+                exc,
+            )
+
+    if not schema_context:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="schema_context is required when auto-discovery is unavailable.",
+        )
+
     store = get_session_store(db)
     session = store.create(
         query_type=body.query_type,
-        schema_context=body.schema_context,
+        schema_context=schema_context,
         db_url=body.db_url,
         system_instructions=body.system_instructions,
     )

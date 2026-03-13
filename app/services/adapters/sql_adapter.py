@@ -8,7 +8,9 @@ from typing import Any
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, make_url
 
+from app.core.config import get_settings
 from app.services.adapters.base import BaseAdapter
+from app.utils.db_url import split_ssl_options_from_url
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +33,20 @@ class SQLAdapter(BaseAdapter):
     """Execute SQL against any SQLAlchemy-supported database in read-only mode."""
 
     def __init__(self, db_url: str) -> None:
-        normalized_url = self._normalize_db_url(db_url)
+        from app.db import _build_connect_args
+
+        clean_url, per_url_ca_b64, per_url_ssl_verify = split_ssl_options_from_url(db_url)
+        normalized_url = self._normalize_db_url(clean_url)
+        settings = get_settings()
+        connect_args = _build_connect_args(
+            normalized_url,
+            per_url_ca_b64 or settings.DB_SSL_CA_B64,
+            True if per_url_ssl_verify is None else per_url_ssl_verify,
+        )
+
         self._engine: Engine = create_engine(
             normalized_url,
+            connect_args=connect_args,
             pool_pre_ping=True,
             pool_size=2,
             max_overflow=3,

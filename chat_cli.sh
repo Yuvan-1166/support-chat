@@ -160,6 +160,49 @@ _collect_schema() {
     read -r _in || _in=""
     [[ -n "$_in" ]] && DB_URL="$_in"
 
+    # Optional per-DB CA certificate (base64) for external/self-signed chains.
+    # This is appended to DB_URL as ssl_ca_b64 query param so the backend can
+    # use the right CA for both schema introspection and query execution.
+    if [[ -n "$DB_URL" ]]; then
+        printf "DB SSL CA (base64) ${DIM}(optional, Enter to skip)${RESET}: "
+        read -r _db_ca_b64 || _db_ca_b64=""
+        if [[ -n "$_db_ca_b64" ]]; then
+            DB_URL=$(python3 - "$DB_URL" "$_db_ca_b64" <<'PY'
+import sys
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+
+url = sys.argv[1]
+ca = sys.argv[2]
+
+parsed = urlparse(url)
+params = parse_qsl(parsed.query, keep_blank_values=True)
+params = [(k, v) for (k, v) in params if k.lower() != "ssl_ca_b64"]
+params.append(("ssl_ca_b64", ca))
+
+print(urlunparse(parsed._replace(query=urlencode(params, doseq=True))))
+PY
+)
+        else
+            printf "Allow insecure SSL ${DIM}(skip cert verification) [y/N]${RESET}: "
+            read -r _ssl_insecure || _ssl_insecure=""
+            if [[ "$_ssl_insecure" =~ ^[Yy]$ ]]; then
+                DB_URL=$(python3 - "$DB_URL" <<'PY'
+import sys
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+
+url = sys.argv[1]
+parsed = urlparse(url)
+params = parse_qsl(parsed.query, keep_blank_values=True)
+params = [(k, v) for (k, v) in params if k.lower() != "ssl_verify"]
+params.append(("ssl_verify", "false"))
+print(urlunparse(parsed._replace(query=urlencode(params, doseq=True))))
+PY
+)
+        printf "${YELLOW}Warning:${RESET} SSL cert verification disabled for this DB session.\n"
+            fi
+    fi
+    fi
+
     # System instructions
     printf "Extra system instructions ${DIM}(optional, Enter to skip)${RESET}: "
     read -r SYSTEM_INSTRUCTIONS || SYSTEM_INSTRUCTIONS=""
@@ -175,12 +218,7 @@ _collect_schema() {
         # Demo schema
         _tnames=("contacts")
         _tdescs=("Stores customer contact records")
-        _tfields=("idINTtrue
-nameVARCHAR(255)false
-emailVARCHAR(255)false
-scoreINTfalse
-is_activeBOOLEANfalse
-created_atDATETIMEfalse")
+        _tfields=($'id\tINT\ttrue\nname\tVARCHAR(255)\tfalse\nemail\tVARCHAR(255)\tfalse\nscore\tINT\tfalse\nis_active\tBOOLEAN\tfalse\ncreated_at\tDATETIME\tfalse')
         printf "${DIM}Using demo schema: contacts table.${RESET}\n"
         return
     fi
@@ -202,7 +240,8 @@ created_atDATETIMEfalse")
             local _is_pk="false"
             [[ "$_fpk" =~ ^[Yy]$ ]] && _is_pk="true"
             # tab-delimited record
-            local record="${_fname}${_ftype}${_is_pk}"
+            local record
+            printf -v record '%s\t%s\t%s' "$_fname" "$_ftype" "$_is_pk"
             if [[ -z "$field_lines" ]]; then
                 field_lines="$record"
             else
@@ -227,27 +266,27 @@ _build_session_payload() {
 
     local t
     for ((t = 0; t < ${#_tnames[@]}; t++)); do
-        stream+="TABLE${_tnames[$t]}${_tdescs[$t]:-}"$'\n'
+        stream+=$'TABLE\t'"${_tnames[$t]}"$'\t'"${_tdescs[$t]:-}"$'\n'
         if [[ -n "${_tfields[$t]:-}" ]]; then
             while IFS= read -r record; do
                 [[ -z "$record" ]] && continue
-                stream+="FIELD${record}"$'\n'
+                stream+=$'FIELD\t'"${record}"$'\n'
             done <<< "${_tfields[$t]}"
         fi
     done
 
-    python3 - \
+    SCHEMA_STREAM="$stream" python3 - \
         "$QUERY_TYPE" \
         "$DB_URL" \
         "${SYSTEM_INSTRUCTIONS:-}" \
-        <<< "$stream" <<'PYEOF'
-import sys, json
+        <<'PYEOF'
+import os, sys, json
 
 args      = sys.argv[1:]
 query_type   = args[0]
 db_url       = args[1]
 system_instr = args[2]
-stream       = sys.stdin.read()
+stream       = os.environ.get('SCHEMA_STREAM', '')
 
 schema = []
 current_table = None

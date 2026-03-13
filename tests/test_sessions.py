@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
+from app.schemas.session import SchemaField, SchemaTable
+
 
 def _create_session(test_client, **overrides):
     """Helper to create a session with default payload."""
@@ -36,6 +40,38 @@ class TestCreateSession:
         resp = _create_session(test_client, db_url="mysql://localhost/test")
         assert resp.status_code == 201
         assert resp.json()["has_db_connection"] is True
+
+    def test_allows_db_url_without_schema_context_via_auto_discovery(self, test_client):
+        with patch("app.api.sessions.introspect_schema") as mock_introspect:
+            mock_introspect.return_value = [
+                SchemaTable(
+                    name="users",
+                    description="Auto-discovered from database metadata",
+                    fields=[SchemaField(name="id", type="INT", is_primary_key=True)],
+                )
+            ]
+
+            resp = test_client.post(
+                "/sessions",
+                json={
+                    "query_type": "mysql",
+                    "db_url": "mysql://localhost/test",
+                    "schema_context": [],
+                },
+            )
+
+        assert resp.status_code == 201
+        assert resp.json()["has_db_connection"] is True
+
+    def test_rejects_when_no_schema_context_and_no_db_url(self, test_client):
+        resp = test_client.post(
+            "/sessions",
+            json={
+                "query_type": "mysql",
+                "schema_context": [],
+            },
+        )
+        assert resp.status_code == 422
 
     def test_rejects_invalid_query_type(self, test_client):
         resp = _create_session(test_client, query_type="invalid")
