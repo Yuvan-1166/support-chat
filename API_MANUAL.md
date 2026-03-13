@@ -751,7 +751,7 @@ If you deploy to Render or another container platform:
 - set `DATABASE_URL`
 - set `GROQ_API_KEY`
 - set `API_KEYS`
-- if using Aiven CA cert, prefer `DB_SSL_CA_B64` instead of `DB_SSL_CA`
+- if using Aiven CA cert, use `DB_SSL_CA_B64`
 
 Generate `DB_SSL_CA_B64` locally with:
 

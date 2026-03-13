@@ -35,14 +35,9 @@ class Settings(BaseSettings):
     #   mysql+pymysql://<user>:<password>@<host>:<port>/<dbname>?ssl_disabled=False
     DATABASE_URL: str = ""
 
-    # Optional path to the Aiven-provided CA certificate file.
-    # Use this for local development where ca.pem is present on disk.
-    DB_SSL_CA: str = ""
-
     # Optional base64-encoded content of the Aiven CA certificate.
-    # Use this for cloud/container deployments (e.g. Render) where you cannot
-    # mount files — paste the output of: base64 -w0 ca.pem
-    # This takes precedence over DB_SSL_CA when both are set.
+    # Use this in all environments instead of mounting a ca.pem file.
+    # Generate with: base64 -w0 ca.pem
     DB_SSL_CA_B64: str = ""
 
     # ── Rate Limiting ────────────────────────────────────────────────────

@@ -13,10 +13,10 @@ Connection-pool strategy
 
 SSL strategy
 ------------
-* If ``DB_SSL_CA`` is set → use the Aiven-provided CA certificate for full
-  TLS chain verification (most secure).
-* Otherwise              → rely on PyMySQL's built-in TLS with server-side
-  certificate validation (still encrypted, no manual cert management required).
+* If ``DB_SSL_CA_B64`` is set → decode the Aiven CA certificate from base64
+    and use it for full TLS chain verification.
+* Otherwise                  → rely on PyMySQL's built-in TLS with server-side
+    certificate validation (still encrypted, no mounted cert file required).
 
 Lazy initialisation
 -------------------
@@ -29,13 +29,13 @@ from __future__ import annotations
 
 import base64
 import logging
-import os
 import ssl
 import tempfile
 import threading
 from typing import Generator
 
 from sqlalchemy import Engine, create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import get_settings
@@ -56,11 +56,8 @@ _lock = threading.Lock()
 _ssl_ca_tempfile: tempfile.NamedTemporaryFile | None = None
 
 
-def _resolve_ssl_ca(ssl_ca: str, ssl_ca_b64: str) -> str:
-    """Return a usable CA cert file path, or empty string if none configured.
-
-    Priority: DB_SSL_CA_B64 (base64 env var) > DB_SSL_CA (file path).
-    """
+def _resolve_ssl_ca(ssl_ca_b64: str) -> str:
+    """Return a usable CA cert file path, or empty string if none configured."""
     global _ssl_ca_tempfile
 
     if ssl_ca_b64:
@@ -75,33 +72,35 @@ def _resolve_ssl_ca(ssl_ca: str, ssl_ca_b64: str) -> str:
             logger.info("MySQL SSL: decoded DB_SSL_CA_B64 → %s", _ssl_ca_tempfile.name)
         return _ssl_ca_tempfile.name
 
-    if ssl_ca:
-        if not os.path.isfile(ssl_ca):
-            raise FileNotFoundError(
-                f"DB_SSL_CA is set to '{ssl_ca}' but the file does not exist.\n"
-                "For containerised / cloud deployments use DB_SSL_CA_B64 instead:\n"
-                "  base64 -w0 ca.pem   # copy the output into the env var on Render"
-            )
-        return ssl_ca
-
     return ""
 
 
-def _build_connect_args(db_url: str, ssl_ca: str, ssl_ca_b64: str = "") -> dict:
+def _normalize_db_url(db_url: str) -> str:
+    """Normalize SQLAlchemy URLs so MySQL always uses the PyMySQL driver."""
+    parsed = make_url(db_url)
+    driver = parsed.drivername.lower()
+
+    if driver in {"mysql", "mysql+mysqldb"}:
+        parsed = parsed.set(drivername="mysql+pymysql")
+        logger.info("Normalized DATABASE_URL driver to mysql+pymysql")
+
+    return parsed.render_as_string(hide_password=False)
+
+
+def _build_connect_args(db_url: str, ssl_ca_b64: str = "") -> dict:
     """Return driver-level ``connect_args`` appropriate for the database dialect.
 
     Parameters
     ----------
     db_url:    Full SQLAlchemy connection URL (dialect detected from prefix).
-    ssl_ca:    Path to CA certificate file (local dev).
-    ssl_ca_b64: Base64-encoded CA certificate content (cloud/container).
+    ssl_ca_b64: Base64-encoded CA certificate content.
     """
     dialect = db_url.split("://")[0].split("+")[0].lower()
 
     if dialect != "mysql":
         return {}
 
-    ca_path = _resolve_ssl_ca(ssl_ca, ssl_ca_b64)
+    ca_path = _resolve_ssl_ca(ssl_ca_b64)
 
     if ca_path:
         ssl_ctx = ssl.create_default_context(cafile=ca_path)
@@ -120,7 +119,7 @@ def _build_connect_args(db_url: str, ssl_ca: str, ssl_ca_b64: str = "") -> dict:
 def _create_engine_from_settings() -> Engine:
     """Validate settings and build the SQLAlchemy engine."""
     settings = get_settings()
-    db_url = settings.DATABASE_URL
+    db_url = _normalize_db_url(settings.DATABASE_URL)
 
     if not db_url:
         raise RuntimeError(
@@ -129,7 +128,7 @@ def _create_engine_from_settings() -> Engine:
             "?ssl_disabled=False"
         )
 
-    connect_args = _build_connect_args(db_url, settings.DB_SSL_CA, settings.DB_SSL_CA_B64)
+    connect_args = _build_connect_args(db_url, settings.DB_SSL_CA_B64)
     logger.info("Creating database engine for: %s", settings.db_url_safe)
 
     return create_engine(

@@ -10,7 +10,7 @@ from alembic import context
 # This guarantees that migrations use exactly the same DATABASE_URL, SSL
 # settings, and connect_args as the running API — no duplication.
 from app.core.config import get_settings
-from app.db import Base, _build_connect_args
+from app.db import Base, _build_connect_args, _normalize_db_url
 from app.db.models import *  # noqa: F401, F403 — ensure all models are registered
 
 # ---------------------------------------------------------------------------
@@ -22,12 +22,13 @@ config = context.config
 # Push the app DATABASE_URL into alembic.ini so it takes precedence over any
 # hard-coded value in the ini file.
 _settings = get_settings()
-if not _settings.DATABASE_URL:
+_database_url = _normalize_db_url(_settings.DATABASE_URL)
+if not _database_url:
     raise RuntimeError(
         "DATABASE_URL is not set.  Add it to your .env file before running "
         "Alembic migrations."
     )
-config.set_main_option("sqlalchemy.url", _settings.DATABASE_URL)
+config.set_main_option("sqlalchemy.url", _database_url)
 
 # Set up Python logging from alembic.ini (optional, kept for alembic tooling).
 if config.config_file_name is not None:
@@ -72,10 +73,10 @@ def run_migrations_online() -> None:
     """
     from sqlalchemy import create_engine
 
-    connect_args = _build_connect_args(_settings.DATABASE_URL, _settings.DB_SSL_CA)
+    connect_args = _build_connect_args(_database_url, _settings.DB_SSL_CA_B64)
 
     connectable = create_engine(
-        _settings.DATABASE_URL,
+        _database_url,
         connect_args=connect_args,
         poolclass=pool.NullPool,  # No pool — release connection after migration
     )

@@ -16,7 +16,7 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Edit .env and set your GROQ_API_KEY
+# Edit .env and set your GROQ_API_KEY, DATABASE_URL, and DB_SSL_CA_B64
 ```
 
 ### 3. Run the server
@@ -91,6 +91,8 @@ curl -X POST http://127.0.0.1:8000/sessions/<session_id>/chat \
 cp .env.example .env
 docker compose up --build
 ```
+
+For Aiven MySQL, do not mount `ca.pem` inside Docker. Use `DB_SSL_CA_B64` instead.
 
 ## Tests
 
