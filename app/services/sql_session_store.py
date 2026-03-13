@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.db.models import ChatMessageModel, SessionModel
 from app.schemas.session import QueryType, SchemaTable
 from app.services.session_store import Session, SessionStoreBase
+from app.utils.json_safety import make_json_safe
 
 logger = logging.getLogger(__name__)
 
@@ -142,12 +143,14 @@ class SQLSessionStore(SessionStoreBase):
 
     def add_message(self, session_id: str, role: str, content: str, **extra: Any) -> dict[str, Any]:
         """Append a message to the database for this session."""
+        safe_query_result = make_json_safe(extra.get("query_result"))
+
         msg = ChatMessageModel(
             session_id=session_id,
             role=role,
             content=content,
             query=extra.get("query"),
-            query_result=extra.get("query_result"),
+            query_result=safe_query_result,
             insight=extra.get("insight"),
             timestamp=datetime.now(timezone.utc),
         )

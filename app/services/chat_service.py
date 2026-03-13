@@ -12,6 +12,7 @@ from app.schemas.chat import ChatMessageRequest, ChatMessageResponse
 from app.services.adapters import get_adapter
 from app.services.session_store import Session, SessionStoreBase
 from app.services.translator import QueryTranslator
+from app.utils.json_safety import make_json_safe
 
 logger = logging.getLogger(__name__)
 
@@ -86,16 +87,22 @@ class ChatService:
 
             # ── 3. Optionally execute ────────────────────────────────────
             if query and request.execute_query and session.has_db_connection:
+                adapter = None
                 try:
                     adapter = get_adapter(session.query_type, session.db_url)
                     if adapter is not None:
                         query_result = adapter.execute(query)
-                        adapter.close()
                 except PermissionError as exc:
                     content += f"\n⚠️ Execution blocked: {exc}"
                 except Exception as exc:
                     logger.exception("Query execution failed")
                     content += f"\n⚠️ Execution error: {exc}"
+                finally:
+                    if adapter is not None:
+                        try:
+                            adapter.close()
+                        except Exception:
+                            logger.exception("Failed to close query adapter")
 
             # ── 4. Optionally generate insight ───────────────────────────
             if query_result is not None and request.generate_insight:
@@ -111,12 +118,14 @@ class ChatService:
                     logger.exception("Insight generation failed")
                     insight = f"Could not generate insight: {exc}"
 
+        safe_query_result = make_json_safe(query_result)
+
         # ── 5. Build and store assistant response ────────────────────────
         response = ChatMessageResponse(
             role="assistant",
             content=content,
             query=query,
-            query_result=query_result,
+            query_result=safe_query_result,
             insight=insight,
             timestamp=datetime.now(timezone.utc),
         )
@@ -127,7 +136,7 @@ class ChatService:
             role="assistant",
             content=content,
             query=query,
-            query_result=query_result,
+            query_result=safe_query_result,
             insight=insight,
         )
         session.messages.append(msg_dict)

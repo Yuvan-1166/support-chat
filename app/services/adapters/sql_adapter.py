@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
 
 from app.services.adapters.base import BaseAdapter
 
@@ -31,12 +31,31 @@ class SQLAdapter(BaseAdapter):
     """Execute SQL against any SQLAlchemy-supported database in read-only mode."""
 
     def __init__(self, db_url: str) -> None:
+        normalized_url = self._normalize_db_url(db_url)
         self._engine: Engine = create_engine(
-            db_url,
+            normalized_url,
             pool_pre_ping=True,
             pool_size=2,
             max_overflow=3,
         )
+
+    @staticmethod
+    def _normalize_db_url(db_url: str) -> str:
+        """Normalize incoming DB URLs so SQLAlchemy picks a supported driver.
+
+        Key rule:
+        - ``mysql://...`` defaults to ``mysqldb`` (MySQLdb), which is not
+          installed in our runtime image.
+        - Force MySQL URLs to ``mysql+pymysql://...``.
+        """
+        parsed = make_url(db_url)
+        driver = parsed.drivername.lower()
+
+        if driver == "mysql" or driver == "mysql+mysqldb":
+            logger.info("Normalizing MySQL DB URL driver to mysql+pymysql")
+            parsed = parsed.set(drivername="mysql+pymysql")
+
+        return parsed.render_as_string(hide_password=False)
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -46,6 +65,9 @@ class SQLAdapter(BaseAdapter):
         upper = query.upper().strip()
         first_word = upper.split()[0] if upper else ""
         if first_word in _WRITE_KEYWORDS:
+            return False
+        # Block stacked statements (e.g. "SELECT ...; DROP TABLE ...")
+        if ";" in upper[:-1]:
             return False
         # Also check for inline writes (e.g. subselect with INSERT)
         for kw in _WRITE_KEYWORDS:
@@ -66,8 +88,7 @@ class SQLAdapter(BaseAdapter):
 
         with self._engine.connect() as conn:
             result = conn.execute(text(query))
-            columns = list(result.keys())
-            rows = [dict(zip(columns, row)) for row in result.fetchall()]
+            rows = [dict(row) for row in result.mappings().all()]
 
         logger.info("SQL query returned %d rows", len(rows))
         return rows
