@@ -113,14 +113,11 @@ trap _cleanup INT TERM EXIT
 # ─────────────────────────────────────────────────────────────────────────────
 
 clear
-cat <<'BANNER'
-  ____                            _     ____ _           _
- / ___| _   _ _ __  _ __   ___  | |_  / ___| |__   __ _| |_
- \___ \| | | | '_ \| '_ \ / _ \ | __|  | |   | '_ \ / _` | __|
-  ___) | |_| | |_) | |_) | (_) || |_   | |___| | | | (_| | |_
- |____/ \__,_| .__/| .__/ \___/  \__|  \____|_| |_|\__,_|\__|
-             |_|   |_|
-BANNER
+
+echo -e "${CYAN}"
+figlet -f slant -c "Support Chat"
+echo -e "${RESET}"
+
 printf "${CYAN}${BOLD}  Natural-language → data query assistant${RESET}\n"
 printf "${DIM}  Type your question in plain English. Use !help for commands.\n${RESET}\n"
 

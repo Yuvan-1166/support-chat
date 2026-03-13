@@ -96,6 +96,11 @@ app.add_middleware(AccessLogMiddleware, coloured=get_settings().is_development)
 app.include_router(sessions.router)
 app.include_router(chat.router)
 
+# ── Root ─────────────────────────────────────────────────────────────────
+
+@app.get("/")
+def app_rooot():
+    return {"Artifact": "Support Chat", "version": app.version}
 
 # ── Health check ─────────────────────────────────────────────────────────
 
