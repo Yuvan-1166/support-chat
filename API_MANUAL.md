@@ -1,82 +1,74 @@
 # Support Chat API Manual
 
-This document explains how an application can integrate with the Support Chat API.
+This manual documents the current API behavior of the Support Chat backend.
 
-The API converts natural-language prompts into database queries, maintains chat sessions, optionally executes generated queries, and can produce insights from query results.
+## What This API Does
 
-## Base URL
+- Creates conversational sessions for data Q&A.
+- Translates natural language to data queries (SQL/MongoDB/Pandas).
+- Optionally executes queries when a `db_url` is attached to the session.
+- Optionally generates plain-English insights from query results.
+- Persists sessions and message history in the app database.
 
-Use one of the following depending on your environment:
+## Base URLs
 
-- Local: `http://127.0.0.1:8000`
-- Production: `https://support-chat-nm8i.onrender.com`
+- Local: `http://localhost:8000`
+- Deployed: https://support-chat-6ajp.onrender.com
 
-## Interactive API Docs
+## Interactive Docs
 
-If the server is running, OpenAPI docs are available at:
-
-- `/docs`
-
-Example:
-
-- `http://127.0.0.1:8000/docs`
+- OpenAPI UI: `/docs`
 
 ## Authentication
 
-Most endpoints require an API key in the `X-API-Key` header.
-
-### Header
+The API uses `X-API-Key` header.
 
 ```http
 X-API-Key: your-api-key
 ```
 
-### Development behavior
-
-If `APP_ENV=development` and `API_KEYS` is empty, authentication is skipped.
-
-### Production behavior
-
-Set `API_KEYS` as a comma-separated list in environment variables.
-
-Example:
-
-```env
-API_KEYS=test-key,another-key
-```
+Behavior:
+- Production: key is required and must exist in `API_KEYS`.
+- Development: if `API_KEYS` is empty, auth is bypassed.
 
 ---
 
-# API Overview
+## Endpoint Summary
 
-| Method | Endpoint | Purpose |
+| Method | Path | Purpose |
 |---|---|---|
+| GET | `/` | Basic service info |
 | GET | `/health` | Health check |
-| POST | `/sessions` | Create a new chat session |
-| GET | `/sessions/{session_id}` | Get session metadata |
-| GET | `/sessions/{session_id}/history` | Get full conversation history |
-| DELETE | `/sessions/{session_id}` | Delete a session |
-| POST | `/sessions/{session_id}/chat` | Send a user message and receive a query / result / insight |
+| POST | `/sessions` | Create a chat session |
+| GET | `/sessions/{session_id}` | Session metadata |
+| GET | `/sessions/{session_id}/history` | Full chat history |
+| DELETE | `/sessions/{session_id}` | Delete session |
+| POST | `/sessions/{session_id}/chat` | Send message / execute / insight |
 
 ---
 
-# 1. Health Check
+## 1. Root
 
-## Endpoint
+### `GET /`
 
-`GET /health`
+Returns basic service metadata.
 
-## Purpose
+Example response:
 
-Confirms the server is running.
-
-## Example Request
-
-```bash
-curl -s http://127.0.0.1:8000/health | jq
+```json
+{
+  "Artifact": "Support Chat",
+  "version": "0.1.0"
+}
 ```
 
-## Example Response
+---
+
+## 2. Health Check
+
+### `GET /health`
+
+Example response:
 
 ```json
 {
@@ -85,695 +77,369 @@ curl -s http://127.0.0.1:8000/health | jq
 }
 ```
 
-## Status Codes
-
+Status codes:
 - `200 OK`
 
 ---
 
-# 2. Create Session
+## 3. Create Session
 
-## Endpoint
+### `POST /sessions`
 
-`POST /sessions`
+Creates a session and stores schema context for future query generation.
 
-## Purpose
-
-Creates a chat session with:
-
-- target query dialect
-- schema context
-- optional database connection URL
-- optional system instructions
-
-A session is required before sending chat messages.
-
-## Headers
-
-```http
-Content-Type: application/json
-X-API-Key: your-api-key
-```
-
-## Request Body
+### Request body
 
 ```json
 {
   "query_type": "mysql",
-  "schema_context": [
-    {
-      "name": "users",
-      "description": "Store user accounts",
-      "fields": [
-        {
-          "name": "id",
-          "type": "INT",
-          "description": "Primary key",
-          "is_primary_key": true
-        },
-        {
-          "name": "name",
-          "type": "VARCHAR(100)",
-          "description": "User full name",
-          "is_primary_key": false
-        },
-        {
-          "name": "is_active",
-          "type": "BOOLEAN",
-          "description": "Whether account is active",
-          "is_primary_key": false
-        },
-        {
-          "name": "signup_date",
-          "type": "DATE",
-          "description": "Date the user signed up",
-          "is_primary_key": false
-        }
-      ]
-    }
-  ],
-  "db_url": "mysql+pymysql://user:password@host:3306/dbname",
-  "system_instructions": "Keep queries efficient and read-only."
+  "schema_context": [],
+  "db_url": "mysql://user:pass@host:3306/dbname",
+  "system_instructions": "Keep queries read-only and efficient."
 }
 ```
 
-## Fields
+### Field details
 
-### `query_type`
+- `query_type` required
+  - allowed: `sql`, `mysql`, `postgresql`, `sqlite`, `mongodb`, `pandas`
+- `schema_context` optional if `db_url` is provided
+- `db_url` optional
+- `system_instructions` optional
 
-Supported values:
+Validation rule:
+- At least one of `schema_context` or `db_url` must be provided.
 
-- `sql`
-- `mysql`
-- `postgresql`
-- `sqlite`
-- `mongodb`
-- `pandas`
+### SQL auto-discovery behavior
 
-### `schema_context`
+When `db_url` is provided and `query_type` is one of `sql/mysql/postgresql/sqlite`:
+- API tries to introspect DB schema automatically (tables, columns, PKs).
+- If introspection succeeds, discovered schema is used.
+- If introspection fails and request already has `schema_context`, API falls back to provided schema.
+- If introspection fails and `schema_context` is empty, API returns `400`.
 
-A list describing the tables, collections, or DataFrames the LLM should use.
-
-When `db_url` is provided for SQL-family query types (`sql`, `mysql`, `postgresql`, `sqlite`),
-the API auto-discovers schema (tables, columns, primary keys) from the target database.
-In that case, `schema_context` can be omitted or sent as an empty list.
-
-### `db_url`
-
-Optional.
-
-If provided, the service may execute generated queries directly when `execute_query=true` is sent later in chat.
-
-If omitted, the API will return query text only.
-
-### `system_instructions`
-
-Optional.
-
-Use this to add business rules or output constraints.
-
-Examples:
-
-- "Always filter deleted records out."
-- "Never query PII columns."
-- "Prefer aggregation queries over row-level output."
-
-## Example Request
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/sessions \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: test-key" \
-  -d '{
-    "query_type": "mysql",
-    "schema_context": [
-      {
-        "name": "users",
-        "description": "Store user accounts",
-        "fields": [
-          {"name": "id", "type": "INT", "is_primary_key": true},
-          {"name": "name", "type": "VARCHAR(100)"},
-          {"name": "is_active", "type": "BOOLEAN"},
-          {"name": "signup_date", "type": "DATE"}
-        ]
-      }
-    ],
-    "system_instructions": "Keep queries optimal."
-  }' | jq
-```
-
-## Example Response
+### Response
 
 ```json
 {
-  "session_id": "8e84110abbe14d2295d96ef1f8ab591c",
-  "created_at": "2026-03-12T10:13:35.156853Z",
+  "session_id": "97be706886d64df89c32935f221f9a8f",
+  "created_at": "2026-03-14T10:00:00.000000Z",
   "query_type": "mysql",
-  "has_db_connection": false
+  "has_db_connection": true
 }
 ```
 
-## Status Codes
-
+Status codes:
 - `201 Created`
+- `400 Bad Request` (for failed auto-discovery with no fallback schema)
 - `401 Unauthorized`
 - `422 Unprocessable Entity`
-- `500 Internal Server Error`
 
 ---
 
-# 3. Get Session Info
+## 4. Get Session Info
 
-## Endpoint
+### `GET /sessions/{session_id}`
 
-`GET /sessions/{session_id}`
+Returns metadata and message count.
 
-## Purpose
-
-Returns metadata for a session.
-
-## Example Request
-
-```bash
-curl -s -X GET http://127.0.0.1:8000/sessions/8e84110abbe14d2295d96ef1f8ab591c \
-  -H "X-API-Key: test-key" | jq
-```
-
-## Example Response
+Example response:
 
 ```json
 {
-  "session_id": "8e84110abbe14d2295d96ef1f8ab591c",
-  "created_at": "2026-03-12T10:13:35.156853Z",
+  "session_id": "97be706886d64df89c32935f221f9a8f",
+  "created_at": "2026-03-14T10:00:00.000000Z",
   "query_type": "mysql",
   "message_count": 4,
-  "has_db_connection": false
+  "has_db_connection": true
 }
 ```
 
-## Status Codes
-
+Status codes:
 - `200 OK`
 - `401 Unauthorized`
 - `404 Not Found`
 
 ---
 
-# 4. Send Chat Message
+## 5. Send Chat Message
 
-## Endpoint
+### `POST /sessions/{session_id}/chat`
 
-`POST /sessions/{session_id}/chat`
+Main conversation endpoint.
 
-## Purpose
-
-Sends a natural-language message into the session.
-
-The API can:
-
-1. generate a query
-2. optionally execute the query
-3. optionally generate an insight from query results
-
-## Headers
-
-```http
-Content-Type: application/json
-X-API-Key: your-api-key
-```
-
-## Request Body
+### Request body
 
 ```json
 {
-  "message": "How many active users signed up this year?",
-  "execute_query": false,
-  "generate_insight": false,
+  "message": "Which table tells whether the customer is available or not?",
+  "execute_query": true,
+  "generate_insight": true,
   "query_result": null
 }
 ```
 
-## Fields
+Field behavior:
+- `message` required
+- `execute_query` default `false`
+- `generate_insight` default `false`
+- `query_result` optional (used when client executes query externally)
 
-### `message`
-
-Required natural-language prompt.
-
-### `execute_query`
-
-Default: `false`
-
-When `true` and the session has a `db_url`, the backend attempts to execute the generated query and return results.
-
-### `generate_insight`
-
-Default: `false`
-
-When `true`, the backend uses returned or supplied query results to produce a plain-English summary.
-
-### `query_result`
-
-Optional.
-
-Use this when your application executes the query externally and wants the API to generate an explanation or insight.
-
-## Mode A: Query Generation Only
-
-### Request
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/sessions/<session_id>/chat \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: test-key" \
-  -d '{
-    "message": "How many active users signed up this year?"
-  }' | jq
-```
-
-### Example Response
+### Response shape
 
 ```json
 {
   "role": "assistant",
-  "content": "This query counts the number of active users who signed up this year by filtering the users table based on the is_active flag and the year of the signup date.",
-  "query": "SELECT COUNT(id) FROM users WHERE is_active = 1 AND YEAR(signup_date) = YEAR(CURDATE())",
-  "query_result": null,
-  "insight": null,
-  "timestamp": "2026-03-12T10:13:36.088449Z"
+  "content": "This query checks availability...",
+  "query": "SELECT ...",
+  "query_result": [{"count": 42}],
+  "insight": "There are 42 matching records.",
+  "timestamp": "2026-03-14T10:02:00.000000Z"
 }
 ```
 
-## Mode B: Generate Insight from External Results
-
-### Request
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/sessions/<session_id>/chat \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: test-key" \
-  -d '{
-    "message": "Explain these results to me",
-    "query_result": [{"count": 1250}],
-    "generate_insight": true
-  }' | jq
-```
-
-### Example Response
-
-```json
-{
-  "role": "assistant",
-  "content": "There are 1250 active users who signed up this year.",
-  "query": null,
-  "query_result": [
-    {
-      "count": 1250
-    }
-  ],
-  "insight": "There are 1250 active users who signed up this year.",
-  "timestamp": "2026-03-12T10:13:36.608897Z"
-}
-```
-
-## Mode C: Execute Query in Backend
-
-This only works if `db_url` was provided when the session was created.
-
-### Request
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/sessions/<session_id>/chat \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: test-key" \
-  -d '{
-    "message": "Show the total number of users",
-    "execute_query": true
-  }' | jq
-```
-
-### Typical Response Shape
-
-```json
-{
-  "role": "assistant",
-  "content": "Here is the generated query and its result.",
-  "query": "SELECT COUNT(*) AS total_users FROM users",
-  "query_result": [
-    {
-      "total_users": 5421
-    }
-  ],
-  "insight": null,
-  "timestamp": "2026-03-12T10:13:36.608897Z"
-}
-```
-
-## Status Codes
-
+Status codes:
 - `200 OK`
 - `401 Unauthorized`
 - `404 Not Found`
 - `422 Unprocessable Entity`
 - `500 Internal Server Error`
 
+### Execution behavior
+
+If `execute_query=true` and session has `db_url`:
+- API selects adapter by `query_type`.
+- Runs query in read-only mode.
+- Appends execution errors in assistant content as `⚠️ Execution error: ...`.
+
+If `query_result` is provided in request:
+- Translation step is skipped.
+- API can directly generate insight from provided result.
+
 ---
 
-# 5. Get Session History
+## 6. Get History
 
-## Endpoint
+### `GET /sessions/{session_id}/history`
 
-`GET /sessions/{session_id}/history`
+Returns all user/assistant messages for the session.
 
-## Purpose
-
-Returns all stored messages in the session.
-
-## Example Request
-
-```bash
-curl -s -X GET http://127.0.0.1:8000/sessions/<session_id>/history \
-  -H "X-API-Key: test-key" | jq
-```
-
-## Example Response
+Response:
 
 ```json
 {
-  "session_id": "8e84110abbe14d2295d96ef1f8ab591c",
+  "session_id": "97be706886d64df89c32935f221f9a8f",
   "messages": [
     {
       "role": "user",
-      "content": "How many active users signed up this year?",
+      "content": "How many contacts?",
       "query": null,
       "query_result": null,
       "insight": null,
-      "timestamp": "2026-03-12T10:13:35"
-    },
-    {
-      "role": "assistant",
-      "content": "This query counts the number of active users who signed up this year by filtering the users table based on the is_active flag and the year of the signup date.",
-      "query": "SELECT COUNT(id) FROM users WHERE is_active = 1 AND YEAR(signup_date) = YEAR(CURDATE())",
-      "query_result": null,
-      "insight": null,
-      "timestamp": "2026-03-12T10:13:36"
+      "timestamp": "2026-03-14T10:05:00"
     }
   ]
 }
 ```
 
-## Status Codes
-
+Status codes:
 - `200 OK`
 - `401 Unauthorized`
 - `404 Not Found`
 
 ---
 
-# 6. Delete Session
+## 7. Delete Session
 
-## Endpoint
+### `DELETE /sessions/{session_id}`
 
-`DELETE /sessions/{session_id}`
+Deletes session and history.
 
-## Purpose
-
-Deletes the session and its stored history.
-
-## Example Request
-
-```bash
-curl -i -X DELETE http://127.0.0.1:8000/sessions/<session_id> \
-  -H "X-API-Key: test-key"
-```
-
-## Example Response
-
-HTTP status only:
-
-```http
-HTTP/1.1 204 No Content
-```
-
-## Status Codes
-
+Status codes:
 - `204 No Content`
 - `401 Unauthorized`
 - `404 Not Found`
 
 ---
 
-# Data Model Reference
+## Session Lifecycle and Expiration
 
-## `SchemaField`
-
-```json
-{
-  "name": "id",
-  "type": "INT",
-  "description": "Primary key",
-  "is_primary_key": true
-}
-```
-
-## `SchemaTable`
-
-```json
-{
-  "name": "users",
-  "description": "Store user accounts",
-  "fields": [
-    {
-      "name": "id",
-      "type": "INT",
-      "description": "Primary key",
-      "is_primary_key": true
-    }
-  ]
-}
-```
-
-## `SessionCreateResponse`
-
-```json
-{
-  "session_id": "string",
-  "created_at": "2026-03-12T10:13:35.156853Z",
-  "query_type": "mysql",
-  "has_db_connection": false
-}
-```
-
-## `ChatMessageResponse`
-
-```json
-{
-  "role": "assistant",
-  "content": "string",
-  "query": "string or null",
-  "query_result": {},
-  "insight": "string or null",
-  "timestamp": "2026-03-12T10:13:36.088449Z"
-}
-```
+- Session TTL is controlled by `SESSION_TTL_SECONDS`.
+- Default is `3600` seconds (1 hour).
+- TTL is sliding: `last_accessed` is updated when session is read/used.
+- Expired sessions are deleted and treated as not found.
 
 ---
 
-# Error Handling
+## DB URL Rules and SSL Options
 
-## `401 Unauthorized`
+For SQL-family sessions with `db_url`:
 
-Returned when API key is missing or invalid.
+- MySQL URLs are normalized to `mysql+pymysql://...` internally.
+- You can pass SSL options in DB URL query params:
 
-Example:
+1. `ssl_ca_b64`
+- Base64-encoded CA cert for that specific DB URL.
+- Used for schema introspection and query execution.
+- Preferred for secure custom cert chains.
 
-```json
-{
-  "detail": "Invalid or missing API key."
-}
-```
-
-## `404 Not Found`
-
-Returned when the session does not exist or has expired.
+2. `ssl_verify`
+- `true` (default): cert verification enabled.
+- `false`: disables cert verification for that DB URL.
 
 Example:
 
-```json
-{
-  "detail": "Session 'abc123' not found or expired."
-}
+```text
+mysql://user:pass@host:3306/db?ssl_verify=false
 ```
 
-## `422 Unprocessable Entity`
+Secure per-DB CA example:
 
-Returned when request payload is invalid.
+```text
+mysql://user:pass@host:3306/db?ssl_ca_b64=<URL-ENCODED-BASE64>
+```
+
+Security note:
+- `ssl_verify=false` should be used only when you cannot obtain a valid CA chain.
+
+---
+
+## Query Safety Rules
+
+### SQL adapter
+
+- Blocks write/DDL keywords at start or inline (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `CREATE`, `REPLACE`, `GRANT`, `REVOKE`).
+- Blocks stacked statements like `SELECT ...; DROP ...`.
+- Allows read-only statements such as `SELECT`, `SHOW`, `DESCRIBE`.
+
+### MongoDB adapter
+
+- Expects JSON query spec.
+- Supports `find` and `aggregate`.
+- Blocks write operations (`insert`, `update`, `delete`, etc.).
+
+### Pandas adapter
+
+- Supports JSON spec with `expression`, optional `columns`, optional `limit`.
+- Also accepts plain expression fallback.
+
+---
+
+## JSON Normalization of Query Results
+
+Before persistence/response, results are converted into JSON-safe values.
 
 Examples:
+- `timedelta` -> `HH:MM:SS`
+- `datetime/date/time` -> ISO strings
+- `Decimal` -> string
+- `bytes` -> UTF-8 string
+- nested values converted recursively
 
-- missing `message`
-- invalid `query_type`
-- malformed JSON
-- missing required fields inside `schema_context`
-
-## `500 Internal Server Error`
-
-Returned for unexpected backend failures.
-
-In development, the response may contain the raw error string.
+This prevents DB JSON column serialization errors during chat message storage.
 
 ---
 
-# Integration Patterns
+## Error Model (Common)
 
-## Pattern 1: Query Generation Only
+Typical error response shape:
 
-Use this when your application wants to:
+```json
+{
+  "detail": "Human-readable error"
+}
+```
 
-- ask business questions in natural language
-- receive a safe query
-- execute it in your own infrastructure
-
-Flow:
-
-1. Create a session without `db_url`
-2. Call chat endpoint with `message`
-3. Read `query`
-4. Execute query yourself
-5. Optionally send `query_result` back with `generate_insight=true`
-
-## Pattern 2: End-to-End Execution in Backend
-
-Use this when your application wants the API to:
-
-- generate the query
-- execute it directly
-- optionally summarize the results
-
-Flow:
-
-1. Create a session with `db_url`
-2. Call chat endpoint with `execute_query=true`
-3. Read `query_result`
-4. Optionally call again with `generate_insight=true`
-
-## Pattern 3: Persistent Conversation
-
-Use one `session_id` across multiple user turns to preserve context.
-
-Example:
-
-- "How many active users signed up this year?"
-- "Break that down by month"
-- "Now only for premium users"
+Common statuses:
+- `400` invalid DB/schema discovery conditions
+- `401` missing/invalid API key
+- `404` missing/expired session
+- `422` payload validation issues
+- `429` in-memory rate limiter exceeded
+- `500` unexpected server error
 
 ---
 
-# Best Practices
+## Environment Variables
 
-- Create one session per user conversation.
-- Always store `session_id` in your client application.
-- Provide rich `schema_context`; better schema descriptions lead to better queries.
-- Use `system_instructions` for business constraints.
-- If you need strict control over DB execution, omit `db_url` and execute queries yourself.
-- Use `/history` to sync chat history into your frontend.
-- Delete sessions when they are no longer needed.
+Key runtime settings:
+
+- `APP_ENV` (`development`/`production`)
+- `LOG_LEVEL`
+- `API_KEYS` (comma-separated)
+- `SESSION_TTL_SECONDS`
+- `GROQ_API_KEY`
+- `GROQ_MODEL`
+- `DATABASE_URL` (app persistence DB)
+- `DB_SSL_CA_B64` (base64 CA for app persistence DB)
 
 ---
 
-# Example End-to-End cURL Flow
+## End-to-End cURL Example
 
-## Step 1: Create session
+### 1) Create session (query-only)
 
 ```bash
-SESSION_ID=$(curl -s -X POST http://127.0.0.1:8000/sessions \
+curl -s -X POST https://support-chat-6ajp.onrender.com/sessions \
   -H "Content-Type: application/json" \
   -H "X-API-Key: test-key" \
   -d '{
     "query_type": "mysql",
     "schema_context": [
       {
-        "name": "users",
-        "description": "Store user accounts",
+        "name": "contacts",
+        "description": "Stores customer contacts",
         "fields": [
           {"name": "id", "type": "INT", "is_primary_key": true},
-          {"name": "name", "type": "VARCHAR(100)"},
-          {"name": "is_active", "type": "BOOLEAN"},
-          {"name": "signup_date", "type": "DATE"}
+          {"name": "name", "type": "VARCHAR(255)"},
+          {"name": "is_active", "type": "BOOLEAN"}
         ]
       }
-    ],
-    "system_instructions": "Keep queries optimal."
-  }' | jq -r '.session_id')
-
-echo "$SESSION_ID"
-```
-
-## Step 2: Ask a question
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/sessions/$SESSION_ID/chat \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: test-key" \
-  -d '{
-    "message": "How many active users signed up this year?"
+    ]
   }' | jq
 ```
 
-## Step 3: Provide external result for summary
+### 2) Ask question
 
 ```bash
-curl -s -X POST http://127.0.0.1:8000/sessions/$SESSION_ID/chat \
+curl -s -X POST https://support-chat-6ajp.onrender.com/sessions/<session_id>/chat \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: test-key" \
+  -d '{"message": "How many active contacts do we have?"}' | jq
+```
+
+### 3) Ask for insight from external result
+
+```bash
+curl -s -X POST https://support-chat-6ajp.onrender.com/sessions/<session_id>/chat \
   -H "Content-Type: application/json" \
   -H "X-API-Key: test-key" \
   -d '{
-    "message": "Explain these results to me",
+    "message": "Explain these results",
     "query_result": [{"count": 1250}],
     "generate_insight": true
   }' | jq
 ```
 
-## Step 4: Fetch history
+### 4) Fetch history
 
 ```bash
-curl -s -X GET http://127.0.0.1:8000/sessions/$SESSION_ID/history \
+curl -s -X GET https://support-chat-6ajp.onrender.com/sessions/<session_id>/history \
   -H "X-API-Key: test-key" | jq
 ```
 
-## Step 5: Delete session
+### 5) Delete session
 
 ```bash
-curl -i -X DELETE http://127.0.0.1:8000/sessions/$SESSION_ID \
+curl -i -X DELETE https://support-chat-6ajp.onrender.com/sessions/<session_id> \
   -H "X-API-Key: test-key"
 ```
 
 ---
 
-# Notes for Docker / Render Deployments
+## Notes for Integrators
 
-If you deploy to Render or another container platform:
-
-- set `DATABASE_URL`
-- set `GROQ_API_KEY`
-- set `API_KEYS`
-- if using Aiven CA cert, use `DB_SSL_CA_B64`
-
-Generate `DB_SSL_CA_B64` locally with:
-
-```bash
-base64 -w0 ca.pem
-```
-
-Paste that output into your deployment environment variable.
-
----
-
-# Summary
-
-To integrate another application:
-
-1. authenticate with `X-API-Key`
-2. create a session with schema context
-3. send chat messages to generate queries
-4. optionally execute queries through backend or externally
-5. optionally generate insights from results
-6. read history or delete the session when done
+- For best query quality, provide rich table/field metadata if not using auto-discovery.
+- For SQL `db_url` sessions, auto-discovery is attempted automatically.
+- If target DB uses self-signed certs, provide `ssl_ca_b64`; use `ssl_verify=false` only as last resort.
+- Session context matters: reuse `session_id` for follow-up questions.

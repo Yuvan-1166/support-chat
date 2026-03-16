@@ -63,6 +63,7 @@ json_str() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 API_URL="http://localhost:8000"
+# API_URL="https://support-chat-6ajp.onrender.com"
 API_KEY=""
 QUERY_TYPE="mysql"
 DB_URL=""
