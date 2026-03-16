@@ -6,15 +6,27 @@ from app.schemas.session import QueryType, SchemaTable
 
 
 def _format_schema(tables: list[SchemaTable]) -> str:
-    """Render schema tables as a human-readable text block for the LLM."""
+    """Render schema tables as a human-readable text block for the LLM.
+
+    Each field shows: name (type[, PK][, FK→table.column]).
+    FK relationships are critical — they tell the LLM which ID columns can
+    be JOINed to get human-readable labels.
+    """
     parts: list[str] = []
     for table in tables:
-        fields = ", ".join(
-            f"{f.name} ({f.type}{'  PK' if f.is_primary_key else ''})"
-            for f in table.fields
-        )
+        field_parts: list[str] = []
+        for f in table.fields:
+            tags: list[str] = [f.type]
+            if f.is_primary_key:
+                tags.append("PK")
+            if f.foreign_key:
+                tags.append(f"FK→{f.foreign_key}")
+            if f.description:
+                tags.append(f.description)
+            field_parts.append(f"{f.name} ({', '.join(tags)})")
+        fields_text = ", ".join(field_parts)
         desc = f" — {table.description}" if table.description else ""
-        parts.append(f"  • {table.name}{desc}\n    Fields: {fields}")
+        parts.append(f"  • {table.name}{desc}\n    Fields: {fields_text}")
     return "\n".join(parts)
 
 
@@ -45,7 +57,7 @@ def build_system_prompt(
         "DATABASE SCHEMA:\n"
         f"{schema_text}\n\n"
         "RULES:\n"
-        "1. When the user asks a data question, respond with a JSON object:\n"
+        "1. When the user asks a data question, respond with ONLY a JSON object:\n"
         '   {"query": "<the generated query>", "explanation": "<brief explanation>", '
         '"confidence": <0.0-1.0>}\n'
         "2. When the user provides query results or asks follow-up questions "
@@ -54,6 +66,17 @@ def build_system_prompt(
         "4. If you cannot generate a valid query, explain why in the 'explanation' field "
         "and set confidence to 0.\n"
         "5. Keep queries efficient and well-formatted.\n"
+        "6. ALWAYS SELECT human-readable columns (name, title, label, email, description) "
+        "instead of bare numeric IDs. When a column is marked FK→table.column in the "
+        "schema, JOIN that referenced table and SELECT its descriptive column (e.g. name, "
+        "title) instead of the raw ID.\n"
+        "7. Give EVERY aggregate expression a clear alias "
+        "(e.g. COUNT(*) AS total_count, SUM(amount) AS total_amount).\n"
+        "8. For 'top N', 'highest', 'most', 'best', or ranking questions, ALWAYS include "
+        "ORDER BY <metric> DESC LIMIT N.\n"
+        "9. Use COALESCE(column, 'N/A') for any displayed text column that could be NULL.\n"
+        "10. Never return a result set that contains only ID columns when the schema has "
+        "corresponding name/label columns accessible via a JOIN.\n"
     )
 
     if system_instructions:

@@ -69,12 +69,26 @@ def introspect_schema(
             pk_constraint = inspector.get_pk_constraint(table_name) or {}
             pk_columns = set(pk_constraint.get("constrained_columns") or [])
 
+            # Build column → "referred_table.referred_column" map from FK constraints
+            fk_map: dict[str, str] = {}
+            try:
+                for fk in inspector.get_foreign_keys(table_name):
+                    ref_table = fk.get("referred_table", "")
+                    ref_cols = fk.get("referred_columns") or []
+                    for local_col in fk.get("constrained_columns") or []:
+                        fk_map[local_col] = (
+                            f"{ref_table}.{ref_cols[0]}" if ref_cols else ref_table
+                        )
+            except Exception:
+                pass  # FK introspection is best-effort; don't fail the whole process
+
             fields = [
                 SchemaField(
                     name=column["name"],
                     type=str(column.get("type", "UNKNOWN")),
                     description=(column.get("comment") or None),
                     is_primary_key=column["name"] in pk_columns,
+                    foreign_key=fk_map.get(column["name"]),
                 )
                 for column in columns
             ]

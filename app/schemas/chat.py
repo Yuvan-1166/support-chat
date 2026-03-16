@@ -24,8 +24,11 @@ class ChatMessageRequest(BaseModel):
         ),
     )
     generate_insight: bool = Field(
-        False,
-        description="When True, pass query results back to the LLM for a natural-language summary",
+        True,
+        description=(
+            "When True, pass query results back to the LLM for a natural-language summary. "
+            "Defaults to True so responses are insight-first when results are available."
+        ),
     )
     query_result: Optional[Any] = Field(
         None,

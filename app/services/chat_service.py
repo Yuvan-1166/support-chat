@@ -56,7 +56,8 @@ class ChatService:
             query_result = request.query_result
             content = "Received your query results."
 
-            if request.generate_insight:
+            # Prefer insight-first responses whenever results are available.
+            if query_result is not None:
                 insight = self._translator.generate_insight(
                     session=session,
                     user_message=request.message,
@@ -105,7 +106,7 @@ class ChatService:
                             logger.exception("Failed to close query adapter")
 
             # ── 4. Optionally generate insight ───────────────────────────
-            if query_result is not None and request.generate_insight:
+            if query_result is not None:
                 try:
                     insight = self._translator.generate_insight(
                         session=session,

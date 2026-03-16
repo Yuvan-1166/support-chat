@@ -23,6 +23,38 @@ class TranslationResult:
     raw_response: dict[str, Any]
 
 
+def _format_result_as_table(query_result: Any) -> str:
+    """Convert query results into a Markdown table for clearer LLM interpretation.
+
+    Falls back to a plain repr for non-tabular data.
+    """
+    if not isinstance(query_result, list) or not query_result:
+        return str(query_result)
+
+    first_row = query_result[0]
+    if not isinstance(first_row, dict):
+        return str(query_result)
+
+    headers = list(first_row.keys())
+    rows = [headers]
+    for row in query_result:
+        rows.append([str(row.get(h, "")) for h in headers])
+
+    # Build Markdown table
+    col_widths = [max(len(str(r[i])) for r in rows) for i in range(len(headers))]
+    sep = "| " + " | ".join("-" * w for w in col_widths) + " |"
+    lines: list[str] = []
+    for i, row in enumerate(rows):
+        line = "| " + " | ".join(str(cell).ljust(col_widths[j]) for j, cell in enumerate(row)) + " |"
+        lines.append(line)
+        if i == 0:
+            lines.append(sep)
+
+    row_count = len(query_result)
+    lines.append(f"\n({row_count} row{'s' if row_count != 1 else ''} returned)")
+    return "\n".join(lines)
+
+
 class QueryTranslator:
     """Translates user messages into data queries using an LLM."""
 
@@ -72,13 +104,25 @@ class QueryTranslator:
             system_instructions=session.system_instructions,
         )
 
-        # Build a context message that includes the query and its result
+        formatted_result = _format_result_as_table(query_result)
+
+        # Build a rich context message that frames the data clearly for the LLM
         context = (
-            f"The user asked: \"{user_message}\"\n"
-            f"The generated query was: {query}\n"
-            f"The query returned these results:\n{query_result}\n\n"
-            "Please provide a clear, concise natural-language summary of "
-            "these results that directly answers the user's question."
+            f"The user asked: \"{user_message}\"\n\n"
+            f"The executed query was:\n{query}\n\n"
+            f"The query returned the following results:\n{formatted_result}\n\n"
+            "Your task:\n"
+            "- Provide a clear, direct natural-language answer to the user's question "
+            "using the data above.\n"
+            "- Present key values (names, amounts, counts) explicitly — do NOT just "
+            "say 'see the table above'.\n"
+            "- Format monetary values with currency symbols and commas "
+            "(e.g. $6,400.00).\n"
+            "- If the result contains only numeric IDs instead of names or labels, "
+            "acknowledge this limitation and suggest the user re-run with a query "
+            "that JOINs the appropriate reference table.\n"
+            "- If the result is empty, say so clearly and suggest possible reasons.\n"
+            "- Be concise: 2–5 sentences unless the data demands more detail.\n"
         )
 
         messages = build_chat_messages(

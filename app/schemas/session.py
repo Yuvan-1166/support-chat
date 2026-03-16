@@ -33,6 +33,10 @@ class SchemaField(BaseModel):
     type: str = Field(..., description="Data type, e.g. INT, VARCHAR(255), ObjectId")
     description: Optional[str] = Field(None, description="Human-readable description")
     is_primary_key: bool = Field(False, description="Whether this is the primary key")
+    foreign_key: Optional[str] = Field(
+        None,
+        description="Referenced table.column for FK columns, e.g. 'contacts.id'",
+    )
 
 
 class SchemaTable(BaseModel):
