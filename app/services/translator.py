@@ -37,7 +37,7 @@ def _format_result_as_table(query_result: Any) -> str:
 
     headers = list(first_row.keys())
     rows = [headers]
-    for row in query_result:
+    for row in query_result[:50]:  # Limit to first 50 rows for LLM performance
         rows.append([str(row.get(h, "")) for h in headers])
 
     # Build Markdown table
