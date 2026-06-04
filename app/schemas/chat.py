@@ -37,6 +37,14 @@ class ChatMessageRequest(BaseModel):
             "here so the bot can generate insights from it."
         ),
     )
+    agent_mode: bool = Field(
+        False,
+        description=(
+            "When True, the agent will run multi-step reasoning to fulfill the request. "
+            "The agent can execute queries, create tasks, update contacts, etc. "
+            "Defaults to False (simple query translation mode)."
+        ),
+    )
 
 
 class ChatMessageResponse(BaseModel):
@@ -48,6 +56,10 @@ class ChatMessageResponse(BaseModel):
     query_result: Optional[Any] = Field(None, description="Result of executing the query")
     insight: Optional[str] = Field(None, description="Natural-language insight from the results")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    agent_reasoning: Optional[list[dict[str, Any]]] = Field(
+        None,
+        description="(Agent mode only) List of reasoning steps with tool calls and results",
+    )
 
 
 class ChatHistoryResponse(BaseModel):
