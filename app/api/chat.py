@@ -22,7 +22,7 @@ router = APIRouter(prefix="/sessions", tags=["Chat"])
     response_model=ChatMessageResponse,
     summary="Send a chat message",
 )
-def send_message(
+async def send_message(
     session_id: str,
     body: ChatMessageRequest,
     _api_key: str = Depends(require_api_key),
@@ -41,7 +41,7 @@ def send_message(
     4. If ``generate_insight`` is ``True`` and results exist, the LLM
        produces a plain-English summary.
     5. If ``agent_mode`` is ``True``, the agent runs multi-step reasoning
-       and can execute queries, create tasks, etc.
+       and can execute queries, create tasks, update contacts, etc.
     """
     store = get_session_store(db)
     session = store.get(session_id)
@@ -51,30 +51,41 @@ def send_message(
             detail=f"Session '{session_id}' not found or expired.",
         )
 
-    # Check if agent mode is requested
     if body.agent_mode:
-        # Use agent service for multi-step reasoning
         translator = QueryTranslator(get_llm_client())
         agent_service = get_agent_service(store, translator)
-        agent_response = agent_service.run_agent(
+
+        # Record user message before running so it's in history for the agent.
+        store.add_message(session.session_id, "user", body.message)
+
+        # Run agent asynchronously to avoid blocking the event loop.
+        agent_response = await agent_service.run_agent_async(
             session=session,
             user_message=body.message,
             max_steps=10,
         )
 
-        # Record user message
-        store.add_message(session.session_id, "user", body.message)
+        # Extract query/result from the first successful execute_query step
+        # so the standard response fields are also populated.
+        extracted_query = None
+        extracted_result = None
+        for step in agent_response.final_tool_results:
+            if step.get("tool") == "execute_query" and step.get("success"):
+                data = step.get("data") or {}
+                extracted_query = data.get("query")
+                extracted_result = data.get("query_result")
+                break
 
-        # Convert agent response to ChatMessageResponse format
         response = ChatMessageResponse(
             role="assistant",
             content=agent_response.content,
+            query=extracted_query,
+            query_result=extracted_result,
             agent_reasoning=[
                 step.model_dump() for step in agent_response.agent_reasoning
             ],
         )
 
-        # Record assistant message
         store.add_message(
             session_id=session.session_id,
             role="assistant",
@@ -82,8 +93,11 @@ def send_message(
         )
 
         return response
-    else:
-        # Use standard chat service for simple query translation
-        chat_service = get_chat_service()
-        response = chat_service.handle_message(store, session, body)
-        return response
+
+    # Standard (non-agent) path — synchronous chat service.
+    import asyncio
+    chat_service = get_chat_service()
+    response = await asyncio.to_thread(
+        chat_service.handle_message, store, session, body
+    )
+    return response

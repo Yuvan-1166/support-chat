@@ -6,7 +6,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -27,13 +27,8 @@ logger = logging.getLogger(__name__)
 
 
 def _warm_db() -> None:
-    """Open one connection to verify DB reachability and pre-fill the pool.
-
-    Called in a thread-pool executor so the event loop is not blocked
-    during the SSL + TCP handshake to the remote database.
-    """
+    """Open one connection to verify DB reachability and pre-fill the pool."""
     from sqlalchemy import text
-
     from app.db import get_engine
 
     engine = get_engine()
@@ -45,11 +40,9 @@ def _warm_db() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown hooks."""
-    # Re-apply after uvicorn may have overwritten the config during startup.
     setup_logging()
 
-    # Warm the DB pool in a background thread — avoids blocking the event
-    # loop during the SSL handshake to the remote Aiven MySQL host.
+    # Warm the DB pool in a background thread.
     try:
         await asyncio.to_thread(_warm_db)
     except Exception as exc:
@@ -57,8 +50,24 @@ async def lifespan(app: FastAPI):
             "DB warm-up failed — check DATABASE_URL / SSL cert config: %s", exc
         )
 
+    # Mount MCP server after DB is ready.
+    try:
+        from app.db import get_db
+        from app.mcp.server import mount_mcp_server
+        from app.services.sql_session_store import get_session_store
+        from app.services.translator import QueryTranslator
+        from app.core.llm import get_llm_client
+
+        db_gen = get_db()
+        db = next(db_gen)
+        session_store = get_session_store(db)
+        translator = QueryTranslator(get_llm_client())
+        mount_mcp_server(app, session_store, translator)
+    except Exception as exc:
+        logger.error("MCP server setup failed: %s", exc)
+
     yield
-    # Cleanup resources on shutdown (future: close DB pools, Redis, etc.)
+    # Future: close DB pools, Redis, etc.
 
 
 # ── App instance ─────────────────────────────────────────────────────────
@@ -75,10 +84,8 @@ app = FastAPI(
 
 # ── Middleware ───────────────────────────────────────────────────────────
 
-# Rate limiting (in-memory, fixed-window, 60 req/min per IP)
 app.add_middleware(RateLimitMiddleware, max_requests=60, window_seconds=60)
 
-# CORS — allow all origins in development; tighten in production
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -87,8 +94,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Access logging — outermost so it captures every request including
-# rate-limited (429) and CORS-rejected ones.
 app.add_middleware(AccessLogMiddleware, coloured=get_settings().is_development)
 
 # ── Routers ──────────────────────────────────────────────────────────────
@@ -96,27 +101,13 @@ app.add_middleware(AccessLogMiddleware, coloured=get_settings().is_development)
 app.include_router(sessions.router)
 app.include_router(chat.router)
 
-# ── Root ─────────────────────────────────────────────────────────────────
 
-@app.get("/")
-def app_rooot():
+@app.get("/", tags=["Root"])
+def app_root():
     return {"Artifact": "Support Chat", "version": app.version}
-
-# ── Health check ─────────────────────────────────────────────────────────
 
 
 @app.get("/health", tags=["System"])
 def health_check():
-    """Simple health-check endpoint."""
-    return {"status": "healthy", "version": app.version}
-
-
-# ── Global error handler ────────────────────────────────────────────────
-
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    """Catch unhandled exceptions and return a clean 500."""
-    settings = get_settings()
-    detail = str(exc) if settings.is_development else "Internal server error"
-    return JSONResponse(status_code=500, content={"detail": detail})
+    """Health check — returns 200 OK if service is running."""
+    return {"status": "healthy", "version": "0.1.0"}

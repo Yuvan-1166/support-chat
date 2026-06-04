@@ -274,17 +274,11 @@ Only include the JSON in your response."""
         user_message: str,
         max_steps: int = 10,
     ) -> AgentResponse:
-        """Run the agent loop for a given user message.
-        
-        Args:
-            session: The current session
-            user_message: The user's request
-            max_steps: Maximum steps to take before ending
-        
-        Returns:
-            AgentResponse with reasoning and results
+        """Run the agent loop synchronously.
+
+        This is the blocking implementation.  Call ``run_agent_async`` from
+        async contexts (FastAPI handlers) to avoid blocking the event loop.
         """
-        # Initialize state
         initial_state = AgentState(
             user_message=user_message,
             session=session,
@@ -292,10 +286,8 @@ Only include the JSON in your response."""
         )
 
         try:
-            # Run the graph
             final_state = self._graph.invoke(initial_state)
 
-            # Convert to AgentResponse
             reasoning_steps = []
             for i, result in enumerate(final_state.tool_results, 1):
                 step = AgentStepInfo(
@@ -303,17 +295,19 @@ Only include the JSON in your response."""
                     node="execute_tool",
                     tool_name=result["tool"],
                     tool_result=result.get("data") or result.get("error"),
-                    action=f"Executed {result['tool']}: {result['error'] if not result['success'] else 'success'}",
+                    action=(
+                        f"Executed {result['tool']}: "
+                        + (result["error"] if not result["success"] else "success")
+                    ),
                 )
                 reasoning_steps.append(step)
 
-            response = AgentResponse(
+            return AgentResponse(
                 content=final_state.final_response,
                 agent_reasoning=reasoning_steps,
                 final_tool_results=final_state.tool_results,
                 error=final_state.error,
             )
-            return response
 
         except Exception as exc:
             logger.exception("Agent execution failed")
@@ -321,6 +315,22 @@ Only include the JSON in your response."""
                 content="Agent encountered an error during execution.",
                 error=str(exc),
             )
+
+    async def run_agent_async(
+        self,
+        session: Session,
+        user_message: str,
+        max_steps: int = 10,
+    ) -> AgentResponse:
+        """Async wrapper — runs the blocking agent loop in a thread pool.
+
+        Use this from FastAPI route handlers to avoid blocking the event loop.
+        """
+        import asyncio
+
+        return await asyncio.to_thread(
+            self.run_agent, session, user_message, max_steps
+        )
 
 
 # ─────────────────────────────────────────────────────────────────
