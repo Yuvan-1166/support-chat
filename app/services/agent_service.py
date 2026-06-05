@@ -286,7 +286,13 @@ Only include the JSON in your response."""
         )
 
         try:
-            final_state = self._graph.invoke(initial_state)
+            final_state_raw = self._graph.invoke(initial_state)
+
+            # LangGraph returns a dict when the state schema is a Pydantic model.
+            if isinstance(final_state_raw, dict):
+                final_state = AgentState(**final_state_raw)
+            else:
+                final_state = final_state_raw
 
             reasoning_steps = []
             for i, result in enumerate(final_state.tool_results, 1):

@@ -1,445 +1,694 @@
-# Support Chat API Manual
+# Support Chat API — Integration Manual
 
-This manual documents the current API behavior of the Support Chat backend.
+**Version**: 0.2.0 (Agent + MCP Update)  
+**Base URL (production)**: `https://support-chat-6ajp.onrender.com`  
+**Base URL (local dev)**: `http://localhost:8000`  
+**Interactive docs**: `/docs`
 
-## What This API Does
+---
 
-- Creates conversational sessions for data Q&A.
-- Translates natural language to data queries (SQL/MongoDB/Pandas).
-- Optionally executes queries when a `db_url` is attached to the session.
-- Optionally generates plain-English insights from query results.
-- Persists sessions and message history in the app database.
+## What Changed in This Version
 
-## Base URLs
+This release adds two major capabilities on top of the original query-translation service.
 
-- Local: `http://localhost:8000`
-- Deployed: https://support-chat-6ajp.onrender.com
+### Agent Mode (NEW)
+The chat endpoint now supports `"agent_mode": true`. Instead of doing a single NL → query translation, the API runs a **LangGraph-based multi-step reasoning loop** powered by Groq LLM. The agent decides which tools to call, calls them in sequence, and returns a full reasoning trace alongside the final answer.
 
-## Interactive Docs
+This is the foundation for the CRM chatbot experience — a user can ask the chat to "find all leads with a score above 80 and create a follow-up task for each", and the agent will reason, query, and act without requiring the front-end to orchestrate each step.
 
-- OpenAPI UI: `/docs`
+### MCP Server (NEW)
+A **Model Context Protocol (MCP)** server is now mounted at `/mcp`. It exposes the same agent tools in a standardised, discoverable format over Server-Sent Events (SSE). External MCP clients (Claude Desktop, custom tooling) can connect and call tools directly using the protocol, independent of the chat session flow.
+
+### Response Envelope Change
+The `ChatMessageResponse` schema gained a new optional field: `agent_reasoning`. In standard mode it is `null`. In agent mode it contains the full step-by-step trace of what the agent thought and did.
+
+---
 
 ## Authentication
 
-The API uses `X-API-Key` header.
+All endpoints require the `X-API-Key` header.
 
-```http
+```
 X-API-Key: your-api-key
 ```
 
-Behavior:
-- Production: key is required and must exist in `API_KEYS`.
-- Development: if `API_KEYS` is empty, auth is bypassed.
+In development (`APP_ENV=development` and `API_KEYS` empty), auth is bypassed. In production, the key must be present in the `API_KEYS` environment variable (comma-separated list).
 
 ---
 
-## Endpoint Summary
-
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/` | Basic service info |
-| GET | `/health` | Health check |
-| POST | `/sessions` | Create a chat session |
-| GET | `/sessions/{session_id}` | Session metadata |
-| GET | `/sessions/{session_id}/history` | Full chat history |
-| DELETE | `/sessions/{session_id}` | Delete session |
-| POST | `/sessions/{session_id}/chat` | Send message / execute / insight |
-
----
-
-## 1. Root
-
-### `GET /`
-
-Returns basic service metadata.
-
-Example response:
-
-```json
-{
-  "Artifact": "Support Chat",
-  "version": "0.1.0"
-}
-```
-
----
-
-## 2. Health Check
+## Endpoints
 
 ### `GET /health`
 
-Example response:
+Health check.
 
 ```json
-{
-  "status": "healthy",
-  "version": "0.1.0"
-}
+{ "status": "healthy", "version": "0.1.0" }
 ```
 
-Status codes:
-- `200 OK`
-
 ---
-
-## 3. Create Session
 
 ### `POST /sessions`
 
-Creates a session and stores schema context for future query generation.
+Create a new chat session. All subsequent chat calls reference this session.
 
-### Request body
+**Request body**
 
 ```json
 {
   "query_type": "mysql",
-  "schema_context": [],
-  "db_url": "mysql://user:pass@host:3306/dbname",
-  "system_instructions": "Keep queries read-only and efficient."
+  "schema_context": [
+    {
+      "name": "contacts",
+      "description": "CRM contact records",
+      "fields": [
+        { "name": "id",        "type": "INT",          "is_primary_key": true },
+        { "name": "name",      "type": "VARCHAR(255)" },
+        { "name": "status",    "type": "VARCHAR(50)"  },
+        { "name": "score",     "type": "INT"          },
+        { "name": "owner_id",  "type": "INT",          "foreign_key": "users.id" }
+      ]
+    }
+  ],
+  "db_url": "mysql://user:pass@host:3306/crm",
+  "system_instructions": "Always use read-only queries. Prefer indexed columns."
 }
 ```
 
-### Field details
+| Field | Required | Notes |
+|---|---|---|
+| `query_type` | yes | `sql`, `mysql`, `postgresql`, `sqlite`, `mongodb`, `pandas` |
+| `schema_context` | conditional | Required if `db_url` is not provided or auto-discovery fails |
+| `db_url` | no | Enables query execution and auto schema discovery |
+| `system_instructions` | no | Injected into every LLM prompt for this session |
 
-- `query_type` required
-  - allowed: `sql`, `mysql`, `postgresql`, `sqlite`, `mongodb`, `pandas`
-- `schema_context` optional if `db_url` is provided
-- `db_url` optional
-- `system_instructions` optional
+**Validation rule**: at least one of `schema_context` or `db_url` must be present.
 
-Validation rule:
-- At least one of `schema_context` or `db_url` must be provided.
+**SQL auto-discovery**: when `db_url` is provided and `query_type` is a SQL dialect, the API introspects the database to build `schema_context` automatically. If introspection fails and `schema_context` was also provided, the manual schema is used as a fallback. If introspection fails and no `schema_context` was given, the request returns `400`.
 
-### SQL auto-discovery behavior
-
-When `db_url` is provided and `query_type` is one of `sql/mysql/postgresql/sqlite`:
-- API tries to introspect DB schema automatically (tables, columns, PKs).
-- If introspection succeeds, discovered schema is used.
-- If introspection fails and request already has `schema_context`, API falls back to provided schema.
-- If introspection fails and `schema_context` is empty, API returns `400`.
-
-### Response
+**Response — `201 Created`**
 
 ```json
 {
-  "session_id": "97be706886d64df89c32935f221f9a8f",
-  "created_at": "2026-03-14T10:00:00.000000Z",
+  "session_id": "058b821fedfd4abba25c9228982d7850",
+  "created_at": "2026-06-04T09:00:00.000000Z",
   "query_type": "mysql",
   "has_db_connection": true
 }
 ```
 
-Status codes:
-- `201 Created`
-- `400 Bad Request` (for failed auto-discovery with no fallback schema)
-- `401 Unauthorized`
-- `422 Unprocessable Entity`
-
 ---
-
-## 4. Get Session Info
 
 ### `GET /sessions/{session_id}`
 
-Returns metadata and message count.
-
-Example response:
+Returns session metadata.
 
 ```json
 {
-  "session_id": "97be706886d64df89c32935f221f9a8f",
-  "created_at": "2026-03-14T10:00:00.000000Z",
+  "session_id": "058b821fedfd4abba25c9228982d7850",
+  "created_at": "2026-06-04T09:00:00.000000Z",
   "query_type": "mysql",
-  "message_count": 4,
+  "message_count": 6,
   "has_db_connection": true
 }
 ```
 
-Status codes:
-- `200 OK`
-- `401 Unauthorized`
-- `404 Not Found`
-
 ---
-
-## 5. Send Chat Message
-
-### `POST /sessions/{session_id}/chat`
-
-Main conversation endpoint.
-
-### Request body
-
-```json
-{
-  "message": "Which table tells whether the customer is available or not?",
-  "execute_query": true,
-  "generate_insight": true,
-  "query_result": null
-}
-```
-
-Field behavior:
-- `message` required
-- `execute_query` default `false`
-- `generate_insight` default `false`
-- `query_result` optional (used when client executes query externally)
-
-### Response shape
-
-```json
-{
-  "role": "assistant",
-  "content": "This query checks availability...",
-  "query": "SELECT ...",
-  "query_result": [{"count": 42}],
-  "insight": "There are 42 matching records.",
-  "timestamp": "2026-03-14T10:02:00.000000Z"
-}
-```
-
-Status codes:
-- `200 OK`
-- `401 Unauthorized`
-- `404 Not Found`
-- `422 Unprocessable Entity`
-- `500 Internal Server Error`
-
-### Execution behavior
-
-If `execute_query=true` and session has `db_url`:
-- API selects adapter by `query_type`.
-- Runs query in read-only mode.
-- Appends execution errors in assistant content as `⚠️ Execution error: ...`.
-
-If `query_result` is provided in request:
-- Translation step is skipped.
-- API can directly generate insight from provided result.
-
----
-
-## 6. Get History
 
 ### `GET /sessions/{session_id}/history`
 
-Returns all user/assistant messages for the session.
-
-Response:
+Returns the full conversation history.
 
 ```json
 {
-  "session_id": "97be706886d64df89c32935f221f9a8f",
+  "session_id": "058b821fedfd4abba25c9228982d7850",
   "messages": [
     {
       "role": "user",
-      "content": "How many contacts?",
+      "content": "How many contacts have a score above 80?",
       "query": null,
       "query_result": null,
       "insight": null,
-      "timestamp": "2026-03-14T10:05:00"
+      "timestamp": "2026-06-04T09:01:00Z",
+      "agent_reasoning": null
+    },
+    {
+      "role": "assistant",
+      "content": "There are 42 contacts with a score above 80.",
+      "query": "SELECT COUNT(*) FROM contacts WHERE score > 80",
+      "query_result": [{ "COUNT(*)": 42 }],
+      "insight": "There are 42 contacts with a score above 80.",
+      "timestamp": "2026-06-04T09:01:02Z",
+      "agent_reasoning": null
     }
   ]
 }
 ```
 
-Status codes:
-- `200 OK`
-- `401 Unauthorized`
-- `404 Not Found`
-
 ---
-
-## 7. Delete Session
 
 ### `DELETE /sessions/{session_id}`
 
-Deletes session and history.
-
-Status codes:
-- `204 No Content`
-- `401 Unauthorized`
-- `404 Not Found`
+Deletes the session and all its history. Returns `204 No Content`.
 
 ---
 
-## Session Lifecycle and Expiration
+### `POST /sessions/{session_id}/chat` ★ Main endpoint
 
-- Session TTL is controlled by `SESSION_TTL_SECONDS`.
-- Default is `3600` seconds (1 hour).
-- TTL is sliding: `last_accessed` is updated when session is read/used.
-- Expired sessions are deleted and treated as not found.
+Send a message. Supports two modes: standard and agent.
 
 ---
 
-## DB URL Rules and SSL Options
+## Standard Mode
 
-For SQL-family sessions with `db_url`:
+The original behaviour. One LLM call: translate the message into a query. Optionally execute it. Optionally generate a plain-English insight.
 
-- MySQL URLs are normalized to `mysql+pymysql://...` internally.
-- You can pass SSL options in DB URL query params:
-
-1. `ssl_ca_b64`
-- Base64-encoded CA cert for that specific DB URL.
-- Used for schema introspection and query execution.
-- Preferred for secure custom cert chains.
-
-2. `ssl_verify`
-- `true` (default): cert verification enabled.
-- `false`: disables cert verification for that DB URL.
-
-Example:
-
-```text
-mysql://user:pass@host:3306/db?ssl_verify=false
-```
-
-Secure per-DB CA example:
-
-```text
-mysql://user:pass@host:3306/db?ssl_ca_b64=<URL-ENCODED-BASE64>
-```
-
-Security note:
-- `ssl_verify=false` should be used only when you cannot obtain a valid CA chain.
-
----
-
-## Query Safety Rules
-
-### SQL adapter
-
-- Blocks write/DDL keywords at start or inline (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `CREATE`, `REPLACE`, `GRANT`, `REVOKE`).
-- Blocks stacked statements like `SELECT ...; DROP ...`.
-- Allows read-only statements such as `SELECT`, `SHOW`, `DESCRIBE`.
-
-### MongoDB adapter
-
-- Expects JSON query spec.
-- Supports `find` and `aggregate`.
-- Blocks write operations (`insert`, `update`, `delete`, etc.).
-
-### Pandas adapter
-
-- Supports JSON spec with `expression`, optional `columns`, optional `limit`.
-- Also accepts plain expression fallback.
-
----
-
-## JSON Normalization of Query Results
-
-Before persistence/response, results are converted into JSON-safe values.
-
-Examples:
-- `timedelta` -> `HH:MM:SS`
-- `datetime/date/time` -> ISO strings
-- `Decimal` -> string
-- `bytes` -> UTF-8 string
-- nested values converted recursively
-
-This prevents DB JSON column serialization errors during chat message storage.
-
----
-
-## Error Model (Common)
-
-Typical error response shape:
+**Request**
 
 ```json
 {
-  "detail": "Human-readable error"
+  "message": "How many active contacts signed up this month?",
+  "execute_query": false,
+  "generate_insight": true,
+  "query_result": null,
+  "agent_mode": false
 }
 ```
 
-Common statuses:
-- `400` invalid DB/schema discovery conditions
-- `401` missing/invalid API key
-- `404` missing/expired session
-- `422` payload validation issues
-- `429` in-memory rate limiter exceeded
-- `500` unexpected server error
+| Field | Default | Notes |
+|---|---|---|
+| `message` | — | Required, min length 1 |
+| `execute_query` | `false` | Runs the query if the session has a `db_url` |
+| `generate_insight` | `true` | LLM summarises results in plain English |
+| `query_result` | `null` | Client-supplied results; triggers insight generation directly |
+| `agent_mode` | `false` | Set to `true` to activate agent mode (see below) |
+
+**Response**
+
+```json
+{
+  "role": "assistant",
+  "content": "SELECT COUNT(*) FROM contacts WHERE is_active = 1 AND MONTH(signup_date) = MONTH(NOW())",
+  "query": "SELECT COUNT(*) FROM contacts WHERE is_active = 1 AND MONTH(signup_date) = MONTH(NOW())",
+  "query_result": null,
+  "insight": null,
+  "timestamp": "2026-06-04T09:01:02Z",
+  "agent_reasoning": null
+}
+```
+
+When `execute_query: true` and a DB connection exists, `query_result` is populated. When `generate_insight: true` and results exist, `content` and `insight` both contain the plain-English summary.
+
+**Providing external results for insight**
+
+If the front-end executes the query itself and only wants an insight:
+
+```json
+{
+  "message": "Explain these results",
+  "query_result": [{ "count": 142 }],
+  "generate_insight": true
+}
+```
+
+The translation step is skipped. The API generates and returns an insight directly.
+
+---
+
+## Agent Mode ★ NEW
+
+Set `"agent_mode": true` to hand control to the LangGraph agent. Instead of a single translation, the agent runs a reasoning loop of up to 10 steps, selecting tools and calling them in sequence until the task is complete.
+
+**Request**
+
+```json
+{
+  "message": "Find all contacts with score above 80 and create a follow-up task for each.",
+  "agent_mode": true
+}
+```
+
+`execute_query`, `generate_insight`, and `query_result` are ignored in agent mode — the agent decides what to do based on the message.
+
+**Response**
+
+```json
+{
+  "role": "assistant",
+  "content": "I completed 2 step(s):\n  ✓ execute_query: success\n  ✓ create_task: success",
+  "query": "SELECT id, name FROM contacts WHERE score > 80",
+  "query_result": [
+    { "id": 1, "name": "Alice" },
+    { "id": 2, "name": "Bob" }
+  ],
+  "insight": null,
+  "timestamp": "2026-06-04T09:01:08Z",
+  "agent_reasoning": [
+    {
+      "step": 1,
+      "node": "execute_tool",
+      "thought": null,
+      "tool_name": "execute_query",
+      "tool_input": null,
+      "tool_result": {
+        "query": "SELECT id, name FROM contacts WHERE score > 80",
+        "query_result": [{ "id": 1, "name": "Alice" }, { "id": 2, "name": "Bob" }]
+      },
+      "action": "Executed execute_query: success"
+    },
+    {
+      "step": 2,
+      "node": "execute_tool",
+      "thought": null,
+      "tool_name": "create_task",
+      "tool_input": null,
+      "tool_result": {
+        "task_id": "task_stub_123",
+        "status": "pending"
+      },
+      "action": "Executed create_task: success"
+    }
+  ]
+}
+```
+
+**Key response fields in agent mode**
+
+| Field | Description |
+|---|---|
+| `content` | Summary of what the agent completed |
+| `query` | Populated if an `execute_query` step ran successfully |
+| `query_result` | Populated if an `execute_query` step returned data |
+| `agent_reasoning` | Array of step objects — full trace of the agent's work |
+
+**`agent_reasoning` step object**
+
+| Field | Type | Description |
+|---|---|---|
+| `step` | int | Step number (1-indexed) |
+| `node` | string | LangGraph node name: `execute_tool` |
+| `tool_name` | string | Name of the tool called |
+| `tool_result` | object | Raw data returned by the tool |
+| `action` | string | Human-readable description |
+
+---
+
+## Agent Tools
+
+These are the tools the agent can call autonomously. They are also exposed via the MCP server for direct external use.
+
+### `execute_query`
+Translates a natural language question into a data query. Executes it if the session has a DB connection.
+
+| Input | Required | Description |
+|---|---|---|
+| `question` | yes | Natural language question |
+| `translate_only` | no (default `false`) | Only generate the query, skip execution |
+
+Returns: `{ query, explanation, confidence, query_result, note }`
+
+### `search_schema`
+Inspects the schema context attached to the session. Useful for the agent to understand what tables and fields are available before composing a query.
+
+| Input | Required | Description |
+|---|---|---|
+| `search_term` | no | Filter tables by name |
+
+Returns: `{ total_tables, matching_tables, search_term }`
+
+### `get_context`
+Retrieves recent conversation history and session metadata. The agent uses this to stay aware of what was previously discussed.
+
+| Input | Required | Description |
+|---|---|---|
+| `last_n` | no (default `5`) | Number of recent messages to return |
+
+Returns: `{ query_type, system_instructions, has_db_connection, recent_messages, message_count }`
+
+### `create_task` ⚠ stub
+Creates a task in the CRM.
+
+| Input | Required | Description |
+|---|---|---|
+| `title` | yes | Task title |
+| `description` | no | Longer description |
+| `priority` | no (default `"normal"`) | `low`, `normal`, or `high` |
+
+Returns: `{ task_id, title, priority, status, note }`
+
+> **CRM integration note**: currently returns a stub response. To activate, replace `_create_task_tool` in `app/services/agent_tools.py` with a real `POST /api/tasks` call to your CRM backend.
+
+### `update_contact` ⚠ stub
+Updates fields on a CRM contact.
+
+| Input | Required | Description |
+|---|---|---|
+| `contact_id` | yes | CRM contact ID |
+| `fields` | yes | Dict of fields to update, e.g. `{ "status": "customer" }` |
+
+Returns: `{ contact_id, updated_fields, note }`
+
+> **CRM integration note**: stub. Replace `_update_contact_tool` with a `PATCH /api/contacts/:id` call.
+
+### `send_email` ⚠ stub
+Sends an email through the CRM.
+
+| Input | Required | Description |
+|---|---|---|
+| `to` | yes | Recipient address |
+| `subject` | yes | Subject line |
+| `body` | yes | Email body |
+| `cc` | no | CC address |
+| `bcc` | no | BCC address |
+
+Returns: `{ email_id, to, subject, status, note }`
+
+> **CRM integration note**: stub. Replace `_send_email_tool` with a `POST /api/emails` call.
+
+---
+
+## MCP Server ★ NEW
+
+The MCP server is mounted at `/mcp` using Server-Sent Events (SSE) transport. It makes all six agent tools and two resources available to any MCP-compatible client.
+
+**Mount point**: `GET /mcp` → redirects to `/mcp/` (307)
+
+### Connecting from a JavaScript/TypeScript client
+
+```typescript
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+
+const transport = new SSEClientTransport(
+  new URL("https://support-chat-6ajp.onrender.com/mcp/")
+);
+const client = new Client({ name: "crm-frontend", version: "1.0.0" });
+await client.connect(transport);
+
+// Call a tool directly
+const result = await client.callTool({
+  name: "execute_query",
+  arguments: {
+    session_id: "058b821fedfd4abba25c9228982d7850",
+    question: "How many contacts have score above 80?",
+    translate_only: false,
+  },
+});
+```
+
+### MCP Resources
+
+Resources provide read-only contextual data to MCP clients.
+
+| URI pattern | Description |
+|---|---|
+| `session://{session_id}` | Full session context: schema, query type, DB status, message count |
+| `contacts://list` | Placeholder contact list (stub — wire to CRM API) |
+
+### MCP Tools
+
+Same tools as the agent toolkit, callable directly from any MCP client without going through the chat session flow.
+
+| Tool | Key inputs | Returns |
+|---|---|---|
+| `execute_query` | `session_id`, `question`, `translate_only` | JSON string with query/results |
+| `search_schema` | `session_id`, `search_term` | JSON string with matching tables |
+| `get_context` | `session_id`, `last_n` | JSON string with recent messages |
+| `create_task` | `session_id`, `title`, `description`, `priority` | JSON string with task_id |
+| `update_contact` | `session_id`, `contact_id`, `fields` (JSON string) | JSON string with confirmation |
+| `send_email` | `session_id`, `to`, `subject`, `body` | JSON string with message_id |
+
+All tools return a JSON-encoded string. Parse with `JSON.parse()` on the client side. Errors are returned inside the JSON under the `error` key rather than as exceptions.
+
+---
+
+## Integrating the Chatbot into the CRM Frontend
+
+### Recommended session lifecycle
+
+```
+User opens chat panel
+  → POST /sessions  (pass CRM schema + optional db_url)
+  → Store session_id in component state
+
+User types message
+  → POST /sessions/{id}/chat
+
+User closes panel or navigates away
+  → DELETE /sessions/{id}
+```
+
+### Standard mode — query-only chatbot
+
+Use this when the CRM frontend will execute queries itself or only needs the generated SQL.
+
+```typescript
+const response = await fetch(`${API}/sessions/${sessionId}/chat`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-API-Key": API_KEY },
+  body: JSON.stringify({ message: userText }),
+});
+const data = await response.json();
+// data.query   → SQL to execute
+// data.content → plain-English answer
+```
+
+### Standard mode — with DB execution
+
+When you provide `db_url` at session creation and set `execute_query: true`, the API executes the query and returns results.
+
+```typescript
+body: JSON.stringify({
+  message: userText,
+  execute_query: true,
+  generate_insight: true,
+})
+// data.query_result → raw results array
+// data.content      → insight summary
+```
+
+### Agent mode — autonomous assistant
+
+Use this for power-user scenarios where the chat should take actions, not just answer questions.
+
+```typescript
+body: JSON.stringify({
+  message: userText,
+  agent_mode: true,
+})
+// data.content          → summary of what the agent did
+// data.agent_reasoning  → step-by-step trace (useful for "show thinking" UI)
+// data.query            → populated if a query ran
+// data.query_result     → populated if a query ran and returned data
+```
+
+### Rendering agent reasoning (optional)
+
+`agent_reasoning` is an array you can render as a collapsible "Show thinking" panel:
+
+```typescript
+interface AgentStep {
+  step: number;
+  node: string;
+  tool_name: string | null;
+  tool_result: Record<string, unknown> | null;
+  action: string;
+}
+
+// Example rendering
+reasoning.map((step: AgentStep) => (
+  <div key={step.step}>
+    <span>Step {step.step}: {step.tool_name}</span>
+    <span>{step.action}</span>
+  </div>
+))
+```
+
+### Providing the CRM schema
+
+Pass the CRM tables the chatbot should know about in `schema_context`. The richer the metadata, the better the query quality.
+
+```typescript
+const session = await fetch(`${API}/sessions`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-API-Key": API_KEY },
+  body: JSON.stringify({
+    query_type: "mysql",
+    schema_context: [
+      {
+        name: "contacts",
+        description: "CRM contacts and leads",
+        fields: [
+          { name: "id",         type: "INT",          is_primary_key: true },
+          { name: "name",       type: "VARCHAR(255)",  description: "Full name" },
+          { name: "status",     type: "VARCHAR(50)",   description: "lead | customer | churned" },
+          { name: "score",      type: "INT",           description: "Lead score 0-100" },
+          { name: "owner_id",   type: "INT",           foreign_key: "users.id" },
+          { name: "created_at", type: "DATETIME" },
+        ],
+      },
+      {
+        name: "deals",
+        description: "Sales pipeline deals",
+        fields: [
+          { name: "id",          type: "INT",    is_primary_key: true },
+          { name: "contact_id",  type: "INT",    foreign_key: "contacts.id" },
+          { name: "stage",       type: "VARCHAR(50)" },
+          { name: "value",       type: "DECIMAL(10,2)" },
+          { name: "closed_at",   type: "DATETIME" },
+        ],
+      },
+    ],
+    system_instructions:
+      "You are a CRM assistant. Use contacts.status to distinguish leads from customers. " +
+      "Never modify data. Keep queries efficient.",
+  }),
+});
+```
+
+---
+
+## Activating the CRM Tool Stubs
+
+The three CRM action tools (`create_task`, `update_contact`, `send_email`) currently return mock data. To wire them to your CRM backend, edit `app/services/agent_tools.py`:
+
+```python
+# Example: _create_task_tool replacement
+import httpx
+
+def _create_task_tool(self, session, tool_input):
+    title = tool_input.get("title")
+    if not title:
+        return ToolResult(tool_name="create_task", success=False, error="'title' is required")
+
+    resp = httpx.post(
+        "https://your-crm.com/api/tasks",
+        headers={"Authorization": f"Bearer {CRM_API_KEY}"},
+        json={
+            "title": title,
+            "description": tool_input.get("description"),
+            "priority": tool_input.get("priority", "normal"),
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return ToolResult(
+        tool_name="create_task",
+        success=True,
+        data={"task_id": data["id"], "status": "created"},
+    )
+```
+
+Apply the same pattern for `_update_contact_tool` (`PATCH /api/contacts/:id`) and `_send_email_tool` (`POST /api/emails`).
+
+---
+
+## Session Management
+
+Sessions have a sliding TTL controlled by `SESSION_TTL_SECONDS` (default 3600 seconds / 1 hour). `last_accessed` is updated on every read or chat call. Expired sessions return `404`.
+
+For a CRM chatbot, a good pattern is:
+- Create a session when the user opens the chat panel
+- Delete it when they close or navigate away
+- Let TTL act as a safety net for abandoned tabs
+
+---
+
+## SSL and Database Connections
+
+When passing a `db_url` to sessions, you can configure SSL inline:
+
+```
+# Disable cert verification (use only for trusted private networks)
+mysql://user:pass@host:3306/db?ssl_verify=false
+
+# Per-session CA cert (base64-encoded, URL-encoded in the query param)
+mysql://user:pass@host:3306/db?ssl_ca_b64=<BASE64>
+```
+
+For the app persistence database (not per-session), set `DB_SSL_CA_B64` in `.env`.
 
 ---
 
 ## Environment Variables
 
-Key runtime settings:
-
-- `APP_ENV` (`development`/`production`)
-- `LOG_LEVEL`
-- `API_KEYS` (comma-separated)
-- `SESSION_TTL_SECONDS`
-- `GROQ_API_KEY`
-- `GROQ_MODEL`
-- `DATABASE_URL` (app persistence DB)
-- `DB_SSL_CA_B64` (base64 CA for app persistence DB)
+| Variable | Default | Description |
+|---|---|---|
+| `GROQ_API_KEY` | — | Required. Groq API key for LLM calls |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model to use |
+| `APP_ENV` | `development` | `development` bypasses auth when `API_KEYS` is empty |
+| `LOG_LEVEL` | `INFO` | Python log level |
+| `SESSION_TTL_SECONDS` | `3600` | Session expiry in seconds (sliding) |
+| `API_KEYS` | — | Comma-separated valid API keys. Empty = auth bypassed in dev |
+| `RATE_LIMIT` | `60/minute` | Per-IP rate limit |
+| `DATABASE_URL` | — | SQLAlchemy URL for the app persistence DB |
+| `DB_SSL_CA_B64` | — | Base64-encoded CA cert for the app DB |
 
 ---
 
-## End-to-End cURL Example
+## Error Responses
 
-### 1) Create session (query-only)
+All errors follow a consistent envelope:
+
+```json
+{ "detail": "Human-readable error message" }
+```
+
+| Status | Cause |
+|---|---|
+| `400` | DB auto-discovery failed with no fallback schema |
+| `401` | Missing or invalid `X-API-Key` |
+| `404` | Session not found or expired |
+| `422` | Validation error (missing required fields, invalid enum value) |
+| `429` | Rate limit exceeded |
+| `500` | Unexpected server error (check server logs) |
+
+---
+
+## Quick Reference
+
+### Create session + ask in agent mode
 
 ```bash
-curl -s -X POST https://support-chat-6ajp.onrender.com/sessions \
+# 1. Create session
+SESSION=$(curl -s -X POST https://support-chat-6ajp.onrender.com/sessions \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: test-key" \
+  -H "X-API-Key: your-key" \
   -d '{
     "query_type": "mysql",
-    "schema_context": [
-      {
-        "name": "contacts",
-        "description": "Stores customer contacts",
-        "fields": [
-          {"name": "id", "type": "INT", "is_primary_key": true},
-          {"name": "name", "type": "VARCHAR(255)"},
-          {"name": "is_active", "type": "BOOLEAN"}
-        ]
-      }
-    ]
-  }' | jq
+    "schema_context": [{
+      "name": "contacts",
+      "fields": [
+        {"name": "id",     "type": "INT", "is_primary_key": true},
+        {"name": "name",   "type": "VARCHAR(255)"},
+        {"name": "score",  "type": "INT"},
+        {"name": "status", "type": "VARCHAR(50)"}
+      ]
+    }]
+  }' | jq -r '.session_id')
+
+# 2. Ask in agent mode
+curl -s -X POST https://support-chat-6ajp.onrender.com/sessions/$SESSION/chat \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-key" \
+  -d '{"message": "Which tables do I have and what are the top 5 contacts by score?", "agent_mode": true}' \
+  | jq '{content, query, agent_steps: (.agent_reasoning | length)}'
+
+# 3. Clean up
+curl -X DELETE https://support-chat-6ajp.onrender.com/sessions/$SESSION \
+  -H "X-API-Key: your-key"
 ```
 
-### 2) Ask question
+### Standard mode with external result
 
 ```bash
-curl -s -X POST https://support-chat-6ajp.onrender.com/sessions/<session_id>/chat \
+curl -s -X POST https://support-chat-6ajp.onrender.com/sessions/$SESSION/chat \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: test-key" \
-  -d '{"message": "How many active contacts do we have?"}' | jq
-```
-
-### 3) Ask for insight from external result
-
-```bash
-curl -s -X POST https://support-chat-6ajp.onrender.com/sessions/<session_id>/chat \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: test-key" \
+  -H "X-API-Key: your-key" \
   -d '{
-    "message": "Explain these results",
-    "query_result": [{"count": 1250}],
+    "message": "Explain what these numbers mean for our pipeline",
+    "query_result": [{"stage": "Proposal", "count": 12, "total_value": 48000}],
     "generate_insight": true
-  }' | jq
+  }' | jq '.content'
 ```
-
-### 4) Fetch history
-
-```bash
-curl -s -X GET https://support-chat-6ajp.onrender.com/sessions/<session_id>/history \
-  -H "X-API-Key: test-key" | jq
-```
-
-### 5) Delete session
-
-```bash
-curl -i -X DELETE https://support-chat-6ajp.onrender.com/sessions/<session_id> \
-  -H "X-API-Key: test-key"
-```
-
----
-
-## Notes for Integrators
-
-- For best query quality, provide rich table/field metadata if not using auto-discovery.
-- For SQL `db_url` sessions, auto-discovery is attempted automatically.
-- If target DB uses self-signed certs, provide `ssl_ca_b64`; use `ssl_verify=false` only as last resort.
-- Session context matters: reuse `session_id` for follow-up questions.
