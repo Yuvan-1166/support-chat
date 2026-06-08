@@ -35,8 +35,9 @@ class AgentStepInfo(BaseModel):
     thought: Optional[str] = None
     tool_name: Optional[str] = None
     tool_input: Optional[dict[str, Any]] = None
-    tool_result: Optional[dict[str, Any]] = None
+    tool_result: Optional[Any] = None
     action: str = ""  # Free-form description of what happened
+
 
 
 class AgentResponse(BaseModel):
@@ -136,10 +137,14 @@ class AgentService:
 
         # Build context for the LLM
         available_tools = self.toolkit.get_tools()
-        tool_descriptions = "\n".join([
-            f"- {name}: {fn.__doc__.split(chr(10))[0]}" if fn.__doc__ else f"- {name}"
-            for name, fn in available_tools.items()
-        ])
+        tool_descriptions_list = []
+        for name, fn in available_tools.items():
+            doc = fn.__doc__ or "No description available."
+            lines = [line.rstrip() for line in doc.split("\n")]
+            indented_doc = "\n".join([f"    {line.strip()}" if line.strip() else "" for line in lines])
+            tool_descriptions_list.append(f"- {name}:\n{indented_doc}")
+        tool_descriptions = "\n".join(tool_descriptions_list)
+
 
         recent_history = state.session.messages[-5:]
         history_str = "\n".join([

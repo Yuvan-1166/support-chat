@@ -111,3 +111,5 @@ def app_root():
 def health_check():
     """Health check — returns 200 OK if service is running."""
     return {"status": "healthy", "version": "0.1.0"}
+# Reload trigger comment
+
