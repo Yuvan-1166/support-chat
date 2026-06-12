@@ -57,3 +57,25 @@ class ChatMessageModel(Base):
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     session = relationship("SessionModel", back_populates="messages")
+
+
+class ToolAuditModel(Base):
+    """Audit trail of AGENT-mode tool executions (one row per tool call).
+
+    Tenant-isolated by ``company_id`` so the CRM can surface a per-company tool
+    audit log (as the assistant module's audit-log endpoint expects).
+    """
+
+    __tablename__ = "tool_audit"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String(36), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=True)
+    company_id = Column(Integer, nullable=True, index=True)
+    emp_id = Column(Integer, nullable=True, index=True)
+
+    tool_name = Column(String(100), nullable=False)
+    tool_input = Column(JSON, nullable=True)
+    result = Column(JSON, nullable=True)
+    success = Column(String(10), nullable=True)  # "true" / "false"
+
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)

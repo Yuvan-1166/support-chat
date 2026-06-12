@@ -1,18 +1,70 @@
-"""Chat API endpoint — send messages, receive queries and insights."""
+"""Chat API endpoint — three-mode agent (ask · visualize · agent)."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import logging
+
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.orm import Session as DBSession
 
+from app.agent import run_mode
+from app.agent.state import AgentContext
+from app.core.llm import get_llm_client
+from app.core.request_context import InvalidIdentityError, build_request_context
 from app.core.security import require_api_key
 from app.db import get_db
-from app.schemas.chat import ChatMessageRequest, ChatMessageResponse
-from app.services.agent_service import get_agent_service
-from app.services.chat_service import get_chat_service
+from app.db.models import ToolAuditModel
+from app.core.request_context import RequestContext
+from app.schemas.chat import (
+    ChatMessageRequest,
+    ChatMessageResponse,
+    ChatMode,
+    PendingActionModel,
+    VisualizationSpec,
+)
 from app.services.sql_session_store import get_session_store
 from app.services.translator import QueryTranslator
-from app.core.llm import get_llm_client
+from app.utils.json_safety import make_json_safe
+
+logger = logging.getLogger(__name__)
+
+
+def _audit_tool_results(
+    db: DBSession,
+    *,
+    session_id: str,
+    ctx: RequestContext,
+    reasoning: list[dict],
+    tool_results: list[dict],
+) -> None:
+    """Write one ``tool_audit`` row per executed tool (best-effort).
+
+    Pairs the reasoning steps (which carry tool name + input) with the tool
+    results positionally; never raises so a bookkeeping failure can't break the
+    user-facing response.
+    """
+    try:
+        for i, tr in enumerate(tool_results):
+            meta = reasoning[i] if i < len(reasoning) else {}
+            result = tr.get("result")
+            success = "true"
+            if isinstance(result, dict) and result.get("success") is False:
+                success = "false"
+            db.add(
+                ToolAuditModel(
+                    session_id=session_id,
+                    company_id=ctx.company_id,
+                    emp_id=ctx.emp_id,
+                    tool_name=meta.get("tool_name") or "unknown",
+                    tool_input=make_json_safe(meta.get("tool_input")),
+                    result=make_json_safe(result),
+                    success=success,
+                )
+            )
+        db.commit()
+    except Exception:  # pragma: no cover - audit must never break the request
+        logger.exception("Failed to write tool audit log")
+        db.rollback()
 
 router = APIRouter(prefix="/sessions", tags=["Chat"])
 
@@ -20,28 +72,27 @@ router = APIRouter(prefix="/sessions", tags=["Chat"])
 @router.post(
     "/{session_id}/chat",
     response_model=ChatMessageResponse,
-    summary="Send a chat message",
+    summary="Send a chat message (ask | visualize | agent)",
 )
 async def send_message(
     session_id: str,
     body: ChatMessageRequest,
+    authorization: str | None = Header(default=None),
     _api_key: str = Depends(require_api_key),
     db: DBSession = Depends(get_db),
 ):
-    """Submit a natural-language message and receive a generated query,
-    optional execution results, and optional natural-language insight.
+    """Handle one conversation turn in the selected mode.
 
-    **Flow**:
-    1. The message is translated into a data query matching the session's
-       ``query_type`` and ``schema_context``.
-    2. If ``execute_query`` is ``True`` and the session has a ``db_url``,
-       the query is executed and results are returned.
-    3. If the caller executed the query externally, they can provide
-       ``query_result`` in the request body.
-    4. If ``generate_insight`` is ``True`` and results exist, the LLM
-       produces a plain-English summary.
-    5. If ``agent_mode`` is ``True``, the agent runs multi-step reasoning
-       and can execute queries, create tasks, update contacts, etc.
+    * **ask** — RAG-grounded help & navigation (no DB, no actions).
+    * **visualize** — generate + execute a read-only, tenant-scoped query and
+      return rows plus a chart spec.
+    * **agent** — autonomous tool use against the CRM API (as the employee
+      identified by the forwarded JWT). Destructive actions return
+      ``requires_confirmation``; resend with ``confirmed: true`` to execute.
+
+    The employee JWT forwarded by the CRM (``Authorization`` header) provides
+    the identity used for AGENT actions and VISUALIZE tenant scoping. ASK mode
+    works without it.
     """
     store = get_session_store(db)
     session = store.get(session_id)
@@ -51,53 +102,71 @@ async def send_message(
             detail=f"Session '{session_id}' not found or expired.",
         )
 
-    if body.agent_mode:
-        translator = QueryTranslator(get_llm_client())
-        agent_service = get_agent_service(store, translator)
+    # Identity from the forwarded JWT. Required for visualize/agent; ASK can run
+    # without it (with a placeholder context).
+    try:
+        ctx_identity = build_request_context(authorization)
+    except InvalidIdentityError as exc:
+        if body.mode == ChatMode.ASK:
+            from app.core.request_context import RequestContext
 
-        # Record user message before running so it's in history for the agent.
-        store.add_message(session.session_id, "user", body.message)
+            ctx_identity = RequestContext(raw_jwt="", emp_id=None, company_id=None, role=None)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Valid employee token required for {body.mode.value} mode: {exc}",
+            )
 
-        # Run agent asynchronously to avoid blocking the event loop.
-        agent_response = await agent_service.run_agent_async(
-            session=session,
-            user_message=body.message,
-            max_steps=10,
-        )
-
-        # Extract query/result from the first successful execute_query step
-        # so the standard response fields are also populated.
-        extracted_query = None
-        extracted_result = None
-        for step in agent_response.final_tool_results:
-            if step.get("tool") == "execute_query" and step.get("success"):
-                data = step.get("data") or {}
-                extracted_query = data.get("query")
-                extracted_result = data.get("query_result")
-                break
-
-        response = ChatMessageResponse(
-            role="assistant",
-            content=agent_response.content,
-            query=extracted_query,
-            query_result=extracted_result,
-            agent_reasoning=[
-                step.model_dump() for step in agent_response.agent_reasoning
-            ],
-        )
-
-        store.add_message(
-            session_id=session.session_id,
-            role="assistant",
-            content=agent_response.content,
-        )
-
-        return response
-
-    # Standard (non-agent) path — synchronous chat service.
-    import asyncio
-    chat_service = get_chat_service()
-    response = await asyncio.to_thread(
-        chat_service.handle_message, store, session, body
+    agent_ctx = AgentContext(
+        session=session,
+        request=ctx_identity,
+        translator=QueryTranslator(get_llm_client()),
+        confirmed=body.confirmed,
     )
-    return response
+
+    # Persist the user turn before running so it is part of history.
+    store.add_message(session.session_id, "user", body.message)
+
+    result = await run_mode(body.mode, agent_ctx, body.message)
+
+    # Persist the assistant turn (with the executed query/result when present).
+    store.add_message(
+        session_id=session.session_id,
+        role="assistant",
+        content=result.content,
+        query=result.executed_query,
+        query_result=result.query_result,
+    )
+
+    # AGENT mode: record a tenant-isolated audit trail of tool executions.
+    if body.mode == ChatMode.AGENT and result.tool_results:
+        _audit_tool_results(
+            db,
+            session_id=session.session_id,
+            ctx=ctx_identity,
+            reasoning=result.agent_reasoning or [],
+            tool_results=result.tool_results,
+        )
+
+    return ChatMessageResponse(
+        role="assistant",
+        mode=body.mode,
+        content=result.content,
+        query=result.executed_query,
+        query_result=result.query_result,
+        visualization=VisualizationSpec(**result.visualization) if result.visualization else None,
+        agent_reasoning=result.agent_reasoning or None,
+        tool_results=result.tool_results or None,
+        requires_confirmation=result.requires_confirmation,
+        pending_action=(
+            PendingActionModel(
+                tool=result.pending_action.tool,
+                tool_input=result.pending_action.tool_input,
+                prompt=result.pending_action.prompt,
+            )
+            if result.pending_action
+            else None
+        ),
+        sources=result.sources or None,
+        error=result.error,
+    )
