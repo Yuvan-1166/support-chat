@@ -43,10 +43,37 @@ class Settings(BaseSettings):
     # ── Rate Limiting ────────────────────────────────────────────────────
     RATE_LIMIT: str = "60/minute"
 
+    # ── CRM Integration ──────────────────────────────────────────────────
+    # Base URL of the CRM REST API that AGENT-mode tools call back into.
+    CRM_BASE_URL: str = "http://localhost:3000"
+    # Shared secret used to *verify* the employee JWT forwarded by the CRM's
+    # /api/assistant proxy.  When blank, the JWT is decoded WITHOUT signature
+    # verification (the CRM is treated as a trusted caller) — set this in any
+    # environment where the service is reachable beyond the CRM.
+    JWT_SECRET: str = ""
+    JWT_ALGORITHMS: str = "HS256"  # comma-separated list
+
+    # ── Agent ────────────────────────────────────────────────────────────
+    AGENT_MAX_STEPS: int = 10
+
+    # ── RAG (ASK mode) ───────────────────────────────────────────────────
+    # Local sentence-transformers model — runs in-process, no API key.
+    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    CHROMA_DIR: str = "./.chroma"
+    CHROMA_COLLECTION: str = "crm_knowledge"
+    # Folder of docs (.md/.txt) ingested into the RAG store for ASK mode.
+    KNOWLEDGE_DOCS_DIR: str = "./knowledge"
+    RAG_TOP_K: int = 5
+
     @property
     def api_key_list(self) -> list[str]:
         """Return API_KEYS split into a list, filtering out blanks."""
         return [k.strip() for k in self.API_KEYS.split(",") if k.strip()]
+
+    @property
+    def jwt_algorithms(self) -> list[str]:
+        """Return JWT_ALGORITHMS split into a list, filtering out blanks."""
+        return [a.strip() for a in self.JWT_ALGORITHMS.split(",") if a.strip()]
 
     @property
     def is_development(self) -> bool:

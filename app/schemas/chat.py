@@ -1,69 +1,110 @@
-"""Pydantic schemas for chat message requests and responses."""
+"""Pydantic schemas for chat message requests and responses (three-mode agent)."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
 
-class ChatMessageRequest(BaseModel):
-    """Payload sent by the client for each conversation turn."""
+class ChatMode(str, Enum):
+    """The three operating modes of the assistant.
 
-    message: str = Field(
-        ...,
-        min_length=1,
-        description="The user's natural-language message",
+    * ``ask``       — RAG-grounded help & navigation (no DB, no actions).
+    * ``visualize`` — read-only insight query → rows + chart spec.
+    * ``agent``     — autonomous tool use to automate CRM features.
+    """
+
+    ASK = "ask"
+    VISUALIZE = "visualize"
+    AGENT = "agent"
+
+
+class ChatMessageRequest(BaseModel):
+    """Payload sent by the client (the CRM proxy) for each conversation turn."""
+
+    message: str = Field(..., min_length=1, max_length=5000, description="The user's message")
+    mode: ChatMode = Field(
+        ChatMode.ASK,
+        description="Which mode to handle this turn: ask | visualize | agent.",
     )
-    execute_query: bool = Field(
+    confirmed: bool = Field(
         False,
         description=(
-            "When True *and* the session has a db_url, the generated query "
-            "will be executed and results returned."
+            "AGENT mode only. Set True to approve a previously returned "
+            "`requires_confirmation` action so it actually executes."
         ),
     )
-    generate_insight: bool = Field(
-        True,
-        description=(
-            "When True, pass query results back to the LLM for a natural-language summary. "
-            "Defaults to True so responses are insight-first when results are available."
-        ),
-    )
-    query_result: Optional[Any] = Field(
-        None,
-        description=(
-            "If the client executed the query externally, provide the result "
-            "here so the bot can generate insights from it."
-        ),
-    )
-    agent_mode: bool = Field(
-        False,
-        description=(
-            "When True, the agent will run multi-step reasoning to fulfill the request. "
-            "The agent can execute queries, create tasks, update contacts, etc. "
-            "Defaults to False (simple query translation mode)."
-        ),
-    )
+
+
+class VisualizationSpec(BaseModel):
+    """Chart rendering hints the CRM frontend uses for VISUALIZE results."""
+
+    chart_type: str = Field("table", description="bar|line|pie|area|scatter|table|number")
+    x: Optional[str] = Field(None, description="Column for the x-axis / category")
+    y: Optional[str] = Field(None, description="Column for the value / measure")
+    aggregate: str = Field("none", description="sum|count|avg|none")
+    title: Optional[str] = None
+    row_count: int = 0
+
+
+class PendingActionModel(BaseModel):
+    """An AGENT action awaiting user confirmation."""
+
+    tool: str
+    tool_input: dict[str, Any] = Field(default_factory=dict)
+    prompt: str
 
 
 class ChatMessageResponse(BaseModel):
     """Single message returned to the client."""
 
-    role: str = Field(..., description="'user' or 'assistant'")
+    role: str = Field("assistant", description="Always 'assistant'")
+    mode: ChatMode = Field(..., description="The mode that handled this turn")
     content: str = Field(..., description="Natural-language response text")
-    query: Optional[str] = Field(None, description="Generated data query, if applicable")
-    query_result: Optional[Any] = Field(None, description="Result of executing the query")
-    insight: Optional[str] = Field(None, description="Natural-language insight from the results")
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # VISUALIZE
+    query: Optional[str] = Field(None, description="The executed SELECT query")
+    query_result: Optional[Any] = Field(None, description="Result rows of the query")
+    visualization: Optional[VisualizationSpec] = Field(None, description="Chart spec for the UI")
+
+    # AGENT
     agent_reasoning: Optional[list[dict[str, Any]]] = Field(
-        None,
-        description="(Agent mode only) List of reasoning steps with tool calls and results",
+        None, description="(Agent mode) reasoning steps with tool calls"
     )
+    tool_results: Optional[list[dict[str, Any]]] = Field(
+        None, description="(Agent mode) raw tool outputs"
+    )
+    requires_confirmation: bool = Field(
+        False, description="(Agent mode) True when an action awaits confirmation"
+    )
+    pending_action: Optional[PendingActionModel] = Field(
+        None, description="(Agent mode) the action to confirm"
+    )
+
+    # Shared
+    sources: Optional[list[dict[str, Any]]] = Field(
+        None, description="(Ask mode) knowledge sources used for grounding"
+    )
+    error: Optional[str] = Field(None, description="Error detail when the turn failed")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ChatHistoryMessage(BaseModel):
+    """A persisted message as stored in the session's history."""
+
+    role: str
+    content: str
+    query: Optional[str] = None
+    query_result: Optional[Any] = None
+    insight: Optional[str] = None
+    timestamp: Optional[Any] = None
 
 
 class ChatHistoryResponse(BaseModel):
     """Full conversation history for a session."""
 
     session_id: str
-    messages: list[ChatMessageResponse]
+    messages: list[ChatHistoryMessage]

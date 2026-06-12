@@ -1,7 +1,13 @@
 """MCP Server for Support Chat.
 
-Registers all agent tools and session resources via FastMCP decorators,
-then exposes a helper to mount the SSE transport onto the FastAPI app.
+Exposes a small set of *read-only / knowledge* capabilities over the Model
+Context Protocol (SSE transport) so external MCP clients (e.g. Claude) can
+introspect sessions and query the ASK-mode knowledge base.
+
+AGENT-mode CRM actions are intentionally NOT exposed here: they require the
+per-employee JWT forwarded by the CRM proxy (for auth + tenant scoping), which
+is not available over the MCP SSE transport.  Use the REST ``/sessions/{id}/chat``
+endpoint with ``mode=agent`` for actions.
 """
 
 from __future__ import annotations
@@ -13,7 +19,8 @@ from typing import Optional
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 
-from app.services.agent_tools import AgentToolkit
+from app.core.llm import get_llm_client
+from app.rag.store import get_knowledge_store
 from app.services.session_store import SessionStoreBase
 from app.services.translator import QueryTranslator
 
@@ -33,7 +40,6 @@ def create_mcp_server(
     translator: QueryTranslator,
 ) -> FastMCP:
     """Create, configure, and return the FastMCP server instance."""
-    toolkit = AgentToolkit(session_store, translator)
     mcp = FastMCP("SupportChatAgent")
 
     # ── Resources ────────────────────────────────────────────────────────
@@ -43,7 +49,7 @@ def create_mcp_server(
         """Returns the full context of a chat session as JSON.
 
         Includes query type, schema tables, DB connection status,
-        system instructions, and recent message count.
+        system instructions, and message count.
         """
         session = session_store.get(session_id)
         if not session:
@@ -66,148 +72,105 @@ def create_mcp_server(
         }
         return json.dumps(context, default=str)
 
-    @mcp.resource("contacts://list")
-    def get_contacts_resource() -> str:
-        """Returns a placeholder list of CRM contacts as JSON.
-
-        In a real deployment this would query the CRM API.
-        """
-        contacts = [
-            {"id": "c1", "name": "Alice", "email": "alice@example.com", "status": "lead", "score": 10},
-            {"id": "c2", "name": "Bob", "email": "bob@example.com", "status": "customer", "score": 100},
-            {"id": "c3", "name": "Charlie", "email": "charlie@example.com", "status": "lead", "score": 25},
-        ]
-        return json.dumps(contacts)
-
     # ── Tools ─────────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def execute_query(session_id: str, question: str, translate_only: bool = False) -> str:
-        """Translate a natural language question into a data query and optionally execute it.
+    def ask_knowledge(question: str, top_k: int = 5) -> str:
+        """Answer a how-to / navigation question from the CRM knowledge base.
 
-        Returns JSON with keys: query, explanation, query_result, note, error.
+        Retrieves the most relevant indexed documentation chunks and asks the
+        LLM to answer grounded on them.  Returns JSON with keys: answer, sources.
         """
-        session = session_store.get(session_id)
-        if not session:
-            return json.dumps({"error": f"Session '{session_id}' not found."})
+        store = get_knowledge_store()
+        snippets = store.retrieve(question, k=top_k)
+        if not snippets:
+            return json.dumps(
+                {
+                    "answer": "No knowledge has been indexed yet. Run the RAG "
+                    "ingestion (python -m app.rag.ingest) first.",
+                    "sources": [],
+                }
+            )
 
-        result = toolkit.call_tool(
-            session,
-            "execute_query",
-            {"question": question, "translate_only": translate_only},
+        context = "\n\n---\n\n".join(
+            f"[source: {s['metadata'].get('source', '?')}]\n{s['text']}"
+            for s in snippets
         )
-        if not result.success:
-            return json.dumps({"error": result.error or "Tool execution failed"})
-        return json.dumps(result.data, default=str)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Answer the question about how the CRM works using ONLY the "
+                    "knowledge snippets. Do not invent steps or menu names. If the "
+                    "snippets don't contain the answer, say so."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"KNOWLEDGE SNIPPETS:\n{context}\n\nQUESTION: {question}",
+            },
+        ]
+        answer = get_llm_client().chat_completion(messages, temperature=0.2)
+        return json.dumps(
+            {
+                "answer": answer,
+                "sources": [s["metadata"].get("source") for s in snippets],
+            },
+            default=str,
+        )
 
     @mcp.tool()
     def search_schema(session_id: str, search_term: str = "") -> str:
         """Inspect the schema context attached to a session.
 
-        Optionally filter by a search term to find relevant tables or fields.
-        Returns JSON with keys: tables, query_type, note.
+        Optionally filter by a search term to find relevant tables.
+        Returns JSON with keys: total_tables, matching_tables.
         """
         session = session_store.get(session_id)
         if not session:
             return json.dumps({"error": f"Session '{session_id}' not found."})
 
-        result = toolkit.call_tool(
-            session,
-            "search_schema",
-            {"search_term": search_term},
+        term = (search_term or "").lower()
+        matching = [
+            {
+                "name": t.name,
+                "description": t.description,
+                "fields": [
+                    {"name": f.name, "type": f.type, "is_primary_key": f.is_primary_key}
+                    for f in t.fields
+                ],
+            }
+            for t in session.schema_context
+            if not term or term in t.name.lower()
+        ]
+        return json.dumps(
+            {"total_tables": len(session.schema_context), "matching_tables": matching},
+            default=str,
         )
-        if not result.success:
-            return json.dumps({"error": result.error or "Tool execution failed"})
-        return json.dumps(result.data, default=str)
 
     @mcp.tool()
     def get_context(session_id: str, last_n: int = 5) -> str:
-        """Retrieve the recent conversation history and session metadata.
+        """Retrieve recent conversation history and session metadata.
 
-        Returns JSON with keys: session_id, query_type, message_count, recent_messages.
+        Returns JSON with keys: query_type, has_db_connection, recent_messages,
+        message_count.
         """
         session = session_store.get(session_id)
         if not session:
             return json.dumps({"error": f"Session '{session_id}' not found."})
 
-        result = toolkit.call_tool(
-            session,
-            "get_context",
-            {"last_n": last_n},
+        return json.dumps(
+            {
+                "query_type": session.query_type,
+                "system_instructions": session.system_instructions,
+                "has_db_connection": session.has_db_connection,
+                "recent_messages": session.messages[-last_n:],
+                "message_count": len(session.messages),
+            },
+            default=str,
         )
-        if not result.success:
-            return json.dumps({"error": result.error or "Tool execution failed"})
-        return json.dumps(result.data, default=str)
 
-    @mcp.tool()
-    def create_task(
-        session_id: str,
-        title: str,
-        description: str = "",
-        priority: str = "normal",
-    ) -> str:
-        """Create a new task in the CRM.
-
-        Returns JSON with keys: task_id, status, note, error.
-        """
-        session = session_store.get(session_id)
-        if not session:
-            return json.dumps({"error": f"Session '{session_id}' not found."})
-
-        result = toolkit.call_tool(
-            session,
-            "create_task",
-            {"title": title, "description": description, "priority": priority},
-        )
-        if not result.success:
-            return json.dumps({"error": result.error or "Task creation failed"})
-        return json.dumps(result.data, default=str)
-
-    @mcp.tool()
-    def update_contact(session_id: str, contact_id: str, fields: str) -> str:
-        """Update fields on a CRM contact.
-
-        `fields` should be a JSON string of key-value pairs to update.
-        Returns JSON with keys: contact_id, status, note, error.
-        """
-        session = session_store.get(session_id)
-        if not session:
-            return json.dumps({"error": f"Session '{session_id}' not found."})
-
-        try:
-            fields_dict = json.loads(fields)
-        except (json.JSONDecodeError, TypeError):
-            return json.dumps({"error": "Invalid fields JSON."})
-
-        result = toolkit.call_tool(
-            session,
-            "update_contact",
-            {"contact_id": contact_id, "fields": fields_dict},
-        )
-        if not result.success:
-            return json.dumps({"error": result.error or "Contact update failed"})
-        return json.dumps(result.data, default=str)
-
-    @mcp.tool()
-    def send_email(session_id: str, to: str, subject: str, body: str) -> str:
-        """Send an email through the CRM.
-
-        Returns JSON with keys: message_id, status, note, error.
-        """
-        session = session_store.get(session_id)
-        if not session:
-            return json.dumps({"error": f"Session '{session_id}' not found."})
-
-        result = toolkit.call_tool(
-            session,
-            "send_email",
-            {"to": to, "subject": subject, "body": body},
-        )
-        if not result.success:
-            return json.dumps({"error": result.error or "Email send failed"})
-        return json.dumps(result.data, default=str)
-
-    logger.info("MCP server 'SupportChatAgent' created with %d tools and 2 resources.", 6)
+    logger.info("MCP server 'SupportChatAgent' created with 3 tools and 1 resource.")
     return mcp
 
 

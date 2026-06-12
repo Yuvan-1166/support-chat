@@ -45,3 +45,7 @@ docker-compose.override.yml
 
 # ── Pip parsing artifacts (e.g. accidental "uv pip install >=x.y") ──
 =*
+
+*.md
+*.sh
+tests/

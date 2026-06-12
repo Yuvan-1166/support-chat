@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.core.security import require_api_key
 from app.db import get_db
-from app.schemas.chat import ChatHistoryResponse, ChatMessageResponse
+from app.schemas.chat import ChatHistoryMessage, ChatHistoryResponse
 from app.schemas.session import (
     QueryType,
     SessionCreateRequest,
@@ -142,7 +142,7 @@ def get_session_history(
         )
 
     messages = [
-        ChatMessageResponse(
+        ChatHistoryMessage(
             role=m["role"],
             content=m["content"],
             query=m.get("query"),
